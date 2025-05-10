@@ -99,6 +99,10 @@ class DocumentDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        # Check if this is a schema generation request
+        if getattr(self, 'swagger_fake_view', False):
+            return Document.objects.none()  # Return empty queryset for schema generation
+
         user = self.request.user
         if hasattr(user, 'profile') and user.profile.is_admin:
             return Document.objects.all()

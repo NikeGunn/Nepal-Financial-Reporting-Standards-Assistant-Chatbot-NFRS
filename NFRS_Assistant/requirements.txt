@@ -6,7 +6,8 @@ psycopg2-binary==2.9.9
 python-dotenv==1.0.0
 gunicorn==21.2.0
 whitenoise==6.6.0
-openai==0.28.1
+# openai==0.28.1
+openai>=1.40.0
 numpy>=1.26.0
 pymupdf==1.23.7
 python-magic-bin==0.4.14; platform_system=='Windows'
