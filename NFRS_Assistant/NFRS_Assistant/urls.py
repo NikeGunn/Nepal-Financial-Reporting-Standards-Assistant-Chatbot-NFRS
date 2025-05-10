@@ -30,7 +30,7 @@ schema_view = get_schema_view(
         default_version='v1',
         description="API documentation for NFRS Assistant chatbot",
         terms_of_service="https://www.nfrs.org/terms/",
-        contact=openapi.Contact(email="contact@nfrs.org"),
+        contact=openapi.Contact(email="programmer@nikhilbhagat.com.np"),
         license=openapi.License(name="MIT License"),
     ),
     public=True,
