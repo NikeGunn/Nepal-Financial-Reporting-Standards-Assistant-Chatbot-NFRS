@@ -1,0 +1,33 @@
+Django==4.2.8
+djangorestframework==3.14.0
+djangorestframework-simplejwt==5.3.0
+drf-yasg==1.21.7
+psycopg2-binary==2.9.9
+python-dotenv==1.0.0
+gunicorn==21.2.0
+whitenoise==6.6.0
+openai==0.28.1
+numpy==1.24.3
+pymupdf==1.23.7
+python-magic-bin==0.4.14; platform_system=='Windows'
+python-magic==0.4.27; platform_system!='Windows'
+python-docx==0.8.11
+google-cloud-translate==3.11.1
+Pillow==10.1.0
+celery==5.3.6
+redis==5.0.1
+pytest==7.4.3
+pytest-django==4.7.0
+coverage==7.3.2
+setuptools>=65.5.0
+wheel>=0.38.4
+
+# Install faiss from PyPI index that has prebuilt wheels
+--find-links https://dl.fbaipublicfiles.com/faiss/wheel/faiss-1.7.4-cp312-cp312-win_amd64.whl
+faiss-cpu==1.7.4; platform_system=='Windows'
+--find-links https://dl.fbaipublicfiles.com/faiss/wheel/faiss-1.7.4-cp312-cp312-linux_x86_64.whl
+faiss-cpu==1.7.4; platform_system=='Linux'
+--find-links https://dl.fbaipublicfiles.com/faiss/wheel/faiss-1.7.4-cp312-cp312-macosx_10_15_x86_64.whl
+faiss-cpu==1.7.4; platform_system=='Darwin' and platform_machine=='x86_64'
+--find-links https://dl.fbaipublicfiles.com/faiss/wheel/faiss-1.7.4-cp312-cp312-macosx_11_0_arm64.whl
+faiss-cpu==1.7.4; platform_system=='Darwin' and platform_machine=='arm64'
