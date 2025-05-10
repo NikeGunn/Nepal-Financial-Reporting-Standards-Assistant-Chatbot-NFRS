@@ -1,0 +1,24 @@
+Django==4.2.8
+djangorestframework==3.14.0
+djangorestframework-simplejwt==5.3.0
+drf-yasg==1.21.7
+psycopg2-binary==2.9.9
+python-dotenv==1.0.0
+gunicorn==21.2.0
+whitenoise==6.6.0
+openai==0.28.1
+numpy>=1.26.0
+pymupdf==1.23.7
+python-magic-bin==0.4.14; platform_system=='Windows'
+python-magic==0.4.27; platform_system!='Windows'
+python-docx==0.8.11
+google-cloud-translate==3.11.1
+Pillow==10.1.0
+celery==5.3.6
+redis==5.0.1
+pytest==7.4.3
+pytest-django==4.7.0
+coverage==7.3.2
+setuptools>=65.5.0
+wheel>=0.38.4
+scikit-learn>=1.3.0
