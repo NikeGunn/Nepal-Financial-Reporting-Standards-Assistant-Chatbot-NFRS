@@ -1,6 +1,6 @@
 # Nepal Financial Reporting Standards Assistant Chatbot (NFRS)
 
-An intelligent document-based conversational AI system built for the Nepal Forest Research and Survey (NFRS) department. This application leverages modern NLP technology to provide accurate, context-aware responses based on organizational knowledge.
+An intelligent document-based conversational AI system built to assist with Nepal Financial Reporting Standards (NFRS). This application leverages modern NLP technology to provide accurate, context-aware responses based on financial regulations, accounting standards, and organizational policies relevant in Nepal.
 
 ![NFRS Assistant](https://github.com/NikeGunn/imagess/blob/main/Nepal%20Financial%20Reporting%20Standards%20(NFRS)/nfrs.png?raw=true)
 
