@@ -43,6 +43,8 @@ class ConversationDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        if getattr(self, 'swagger_fake_view', False):
+            return Conversation.objects.none()
         return Conversation.objects.filter(user=self.request.user)
 
 
@@ -54,6 +56,8 @@ class MessageDetailView(generics.RetrieveAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        if getattr(self, 'swagger_fake_view', False):
+            return Message.objects.none()
         return Message.objects.filter(conversation__user=self.request.user)
 
 

@@ -102,4 +102,6 @@ class ApiKeyDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        if getattr(self, 'swagger_fake_view', False):  # Check for schema generation
+            return ApiKey.objects.none()  # Return empty queryset during schema generation
         return ApiKey.objects.filter(user=self.request.user)
