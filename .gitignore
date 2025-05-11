@@ -71,3 +71,6 @@ celerybeat.pid
 # Miscellaneous
 node_modules/
 .sass-cache/
+
+# Google credentials
+google-credentials.json
