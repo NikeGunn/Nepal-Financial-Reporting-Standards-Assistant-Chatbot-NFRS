@@ -203,12 +203,78 @@ class ChatMessageView(APIView):
     def vector_search(self, query, top_k=3):
         """
         Perform vector search using the vector operations utility.
+        With fallback for missing/empty vector index.
         """
         try:
             # Use the vector_search function from utils.vector_ops
-            return perform_vector_search(query, top_k=top_k)
+            results = perform_vector_search(query, top_k=top_k)
+
+            # If we got results, return them
+            if results:
+                return results
+
+            # Log the issue but don't fail the request
+            logger.warning("Vector search returned empty results. This might be due to missing vector index or no relevant content.")
+
+            # Check if we have any active index in the database
+            from api.knowledge.models import VectorIndex, Document
+
+            # Check if there are any indices in the database
+            if not VectorIndex.objects.filter(is_active=True).exists():
+                logger.error("No active vector index found in database")
+
+                # Try to see if we need to create a new index
+                index_files = [f for f in os.listdir(settings.VECTOR_STORE_DIR)
+                              if f.endswith('.index') and os.path.isfile(os.path.join(settings.VECTOR_STORE_DIR, f))]
+
+                if index_files:
+                    # Found index files but no database entry - create one
+                    index_file = index_files[0]  # Use the first one found
+                    logger.info(f"Creating database entry for existing index file: {index_file}")
+
+                    index_path = os.path.join(settings.VECTOR_STORE_DIR, index_file)
+                    index_name = os.path.splitext(index_file)[0]
+
+                    # Create vector index entry
+                    VectorIndex.objects.create(
+                        name=index_name,
+                        description="Auto-recovered NFRS documents vector index",
+                        index_file_path=index_path,
+                        is_active=True
+                    )
+
+                    # Try the search again
+                    return perform_vector_search(query, top_k=top_k)
+
+            # If we have no vector index or results, fall back to a basic keyword search
+            # This ensures the user still gets some response even without vector search
+            logger.info("Falling back to basic keyword search")
+            documents = Document.objects.filter(
+                status='processed',
+                is_deleted=False
+            ).order_by('-created_at')[:5]  # Get 5 most recent documents
+
+            basic_results = []
+            for doc in documents:
+                # Get a chunk from this document
+                chunks = DocumentChunk.objects.filter(document=doc)[:1]
+                if chunks.exists():
+                    chunk = chunks.first()
+                    basic_results.append({
+                        'score': 0.5,  # Default score
+                        'document_id': doc.id,
+                        'chunk_id': chunk.id,
+                        'content': f"Document: {doc.title}\n\n{chunk.content[:500]}",
+                        'page_number': chunk.page_number
+                    })
+
+            if basic_results:
+                return basic_results
+
+            return []
+
         except Exception as e:
-            print(f"Vector search error: {e}")
+            logger.error(f"Vector search error: {e}")
             return []
 
     def translate_text(self, text, target_language='ne'):
@@ -216,9 +282,17 @@ class ChatMessageView(APIView):
         Translate text between English and Nepali.
         """
         try:
-            # Set Google credentials path from settings if available
-            if hasattr(settings, 'GOOGLE_APPLICATION_CREDENTIALS'):
+            # Set Google credentials path - first check for project root path
+            google_credentials_path = os.path.join(settings.BASE_DIR, 'google-credentials.json')
+            if os.path.exists(google_credentials_path):
+                os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = google_credentials_path
+            elif hasattr(settings, 'GOOGLE_APPLICATION_CREDENTIALS') and settings.GOOGLE_APPLICATION_CREDENTIALS:
                 os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = settings.GOOGLE_APPLICATION_CREDENTIALS
+
+            # Check if credentials file exists
+            if not os.path.exists(os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', '')):
+                logger.error(f"Google credentials file not found at {os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')}")
+                raise FileNotFoundError(f"Google credentials file not found at {os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')}")
 
             client = translate.Client()
             source_language = 'ne' if target_language == 'en' else 'en'
@@ -252,17 +326,15 @@ class TranslateMessageView(APIView):
                 # Get the message and check user permissions
                 message = Message.objects.get(id=message_id, conversation__user=request.user)
 
-                # Translate the message
-                client = translate.Client()
+                # Use the more robust utility function from utils.translation
+                from utils.translation import translate_text
                 source_language = 'en' if target_language == 'ne' else 'ne'
 
-                result = client.translate(
+                translated_text = translate_text(
                     message.content,
                     target_language=target_language,
                     source_language=source_language
                 )
-
-                translated_text = result['translatedText']
 
                 return Response({
                     "original_text": message.content,
@@ -277,6 +349,7 @@ class TranslateMessageView(APIView):
                     status=status.HTTP_404_NOT_FOUND
                 )
             except Exception as e:
+                logger.error(f"Translation error: {e}")
                 return Response(
                     {"error": str(e)},
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR

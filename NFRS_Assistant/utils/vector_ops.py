@@ -67,20 +67,37 @@ def get_active_index():
             logger.warning("No active vector index found")
             return None, None, None
 
-        # Check if index file exists
+        # Check if index file exists with the exact path
         index_path = vector_index.index_file_path
+
+        # If the exact path doesn't exist, try to find it relative to the project's vector_store directory
         if not os.path.exists(index_path):
-            logger.warning(f"Vector index file not found: {index_path}")
-            return None, None, None
+            logger.warning(f"Vector index file not found at original path: {index_path}")
+
+            # Try to locate the file in the project's vector_store directory
+            filename = os.path.basename(index_path)
+            alternative_path = os.path.join(settings.VECTOR_STORE_DIR, filename)
+
+            if os.path.exists(alternative_path):
+                logger.info(f"Found vector index at alternative path: {alternative_path}")
+                index_path = alternative_path
+
+                # Update the database with the correct path
+                vector_index.index_file_path = alternative_path
+                vector_index.save()
+            else:
+                logger.warning(f"Vector index file not found at alternative path: {alternative_path}")
+                return None, None, None
 
         # Load scikit-learn compatible index
         with open(index_path, 'rb') as f:
             embeddings = pickle.load(f)
 
         # Try multiple potential metadata paths
+        base_filename = os.path.splitext(os.path.basename(index_path))[0]
         metadata_paths = [
             # Original path - filename based on the index file name
-            os.path.join(os.path.dirname(index_path), f"{os.path.splitext(os.path.basename(index_path))[0]}_metadata.json"),
+            os.path.join(os.path.dirname(index_path), f"{base_filename}_metadata.json"),
             # Common path attempted in the error message
             os.path.join(os.path.dirname(index_path), "index_metadata.json"),
             # Any specific files that might exist in vector_store directory

@@ -38,6 +38,13 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    # Rest framework
+    "rest_framework",
+    "drf_yasg",
+    # Project apps
+    "api.knowledge",
+    "api.chat",
+    "api.users",
 ]
 
 MIDDLEWARE = [
@@ -55,7 +62,7 @@ ROOT_URLCONF = "NFRS_Assistant.urls"
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [],
+        "DIRS": [os.path.join(BASE_DIR, 'templates')],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
