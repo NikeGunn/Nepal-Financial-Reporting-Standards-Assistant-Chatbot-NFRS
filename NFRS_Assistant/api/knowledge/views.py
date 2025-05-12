@@ -14,6 +14,7 @@ import uuid
 import pickle
 import subprocess
 import threading
+import logging  # Added import for logging
 from sklearn.metrics.pairwise import cosine_similarity
 from .models import Document, DocumentChunk, VectorIndex
 from .serializers import (
@@ -21,6 +22,9 @@ from .serializers import (
     VectorIndexSerializer, SearchQuerySerializer
 )
 from utils.vector_ops import create_embedding, update_index_with_chunks, vector_search
+
+# Setup logger
+logger = logging.getLogger(__name__)
 
 # Helper function to run document processing in background
 def process_document_async(document_id):
@@ -122,28 +126,46 @@ class DocumentUploadView(APIView):
 
     def post(self, request):
         try:
+            # Set a moderate timeout for regular uploads
+            request.upload_handlers[0].chunk_size = 5 * 1024 * 1024  # 5MB chunk size
+
+            # Process the upload request
             serializer = DocumentUploadSerializer(data=request.data, context={'request': request})
             if serializer.is_valid():
-                document = serializer.save()
+                # Create and save document with pending status
+                document = serializer.save(processing_status='pending')
 
-                # Set document to pending status for background processing
-                document.processing_status = 'pending'
-                document.save()
+                # Import the processor utility directly
+                from utils.document_processor import process_document_async
 
-                # Start background processing in a fully detached manner
-                # Schedule the async processing to happen after the response is sent
+                # Use a unique flag to prevent duplicate processing attempts
+                processing_flag = f"doc_{document.id}_processing_{uuid.uuid4().hex[:8]}"
+
+                # Log the processing attempt
+                logger.info(f"Scheduling document {document.id} '{document.title}' for processing with flag: {processing_flag}")
+
+                # Schedule background processing - only when transaction completes
                 transaction.on_commit(lambda: process_document_async(document.id))
 
-                # Return response immediately without waiting for processing
+                # Return success immediately to avoid client timeout
+                response_data = DocumentSerializer(document).data
+                response_data['status'] = 'success'
+                response_data['message'] = 'Document uploaded successfully and is being processed in the background.'
+
                 return Response(
-                    DocumentSerializer(document).data,
+                    response_data,
                     status=status.HTTP_201_CREATED
                 )
+
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
         except Exception as e:
+            # Log error without trying to import logging again
+            logger.error(f"Error in DocumentUploadView: {str(e)}")
+
             # Catch any unexpected errors during upload and return a friendly message
             return Response(
-                {"error": f"Document upload failed: {str(e)}"},
+                {"error": f"Document upload failed: {str(e)}", "status": "error"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -161,7 +183,6 @@ class AdminDocumentUploadView(DocumentUploadView):
             request.upload_handlers[0].chunk_size = 10 * 1024 * 1024  # Increase chunk size to 10MB
 
             # Set a longer timeout for large uploads
-            from django.conf import settings
             if hasattr(settings, 'DATA_UPLOAD_MAX_MEMORY_SIZE'):
                 # Temporarily increase max memory size for this request
                 original_max_size = settings.DATA_UPLOAD_MAX_MEMORY_SIZE
@@ -175,6 +196,13 @@ class AdminDocumentUploadView(DocumentUploadView):
                 # Set document to pending status for background processing
                 document.processing_status = 'pending'
                 document.save()
+                
+                # Import the processor utility directly 
+                from utils.document_processor import process_document_async
+                
+                # Use a unique identifier for tracking this processing job
+                process_id = uuid.uuid4().hex[:8]
+                logger.info(f"Admin document upload: Scheduling document {document.id} '{document.title}' for processing with ID: {process_id}")
 
                 # Start background processing in a fully detached manner
                 # Schedule the async processing to happen after the response is sent
@@ -198,9 +226,7 @@ class AdminDocumentUploadView(DocumentUploadView):
                 settings.DATA_UPLOAD_MAX_MEMORY_SIZE = original_max_size
 
         except Exception as e:
-            # Log the error for debugging
-            import logging
-            logger = logging.getLogger(__name__)
+            # Log the error for debugging using the module-level logger
             logger.error(f"Error in AdminDocumentUploadView: {str(e)}")
 
             # Return a more informative error response
