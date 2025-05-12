@@ -17,12 +17,13 @@ def process_new_document(sender, instance, created, **kwargs):
     This will extract text, create chunks, and generate embeddings for the document.
     The processing runs in a separate transaction to avoid blocking the request.
     """
-    if created or (instance.processing_status == 'pending' and not kwargs.get('raw', False)):
-        # Skip if this is a raw save (like from a fixture) or if already processing
-        if kwargs.get('raw', False) or instance.processing_status != 'pending':
-            return
+    # Only process documents that are in 'pending' state and not created from a raw save
+    if instance.processing_status == 'pending' and not kwargs.get('raw', False):
+        # Import here to avoid circular imports
+        from utils.document_processor import process_document_async
 
-        # Use transaction.on_commit to process the document after the current transaction completes
+        # Use transaction.on_commit to ensure processing starts after the current transaction completes
+        logger.info(f"Scheduling document {instance.id} for background processing via signal handler")
         transaction.on_commit(lambda: process_document_async(instance.id))
 
 
