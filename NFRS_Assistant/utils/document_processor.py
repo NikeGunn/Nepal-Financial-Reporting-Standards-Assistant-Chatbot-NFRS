@@ -134,7 +134,7 @@ def process_document(document_or_id):
         list: List of created DocumentChunk instances
     """
     from api.knowledge.models import DocumentChunk, Document
-    from django.db import transaction
+    from django.db import transaction, IntegrityError, connection
     import logging
     logger = logging.getLogger(__name__)
 
@@ -156,19 +156,25 @@ def process_document(document_or_id):
 
         # Update document status
         document.processing_status = 'processing'
-        document.error_message = '' # Clear any previous error messages
+        document.error_message = ''  # Clear any previous error messages
         document.save(update_fields=['processing_status', 'error_message'])
 
-        # Use a transaction for cleaning up existing chunks to ensure atomicity
-        with transaction.atomic():
-            # First clean up any existing chunks to avoid unique constraint violations
-            existing_chunks_count = DocumentChunk.objects.filter(document=document).count()
-            if existing_chunks_count > 0:
-                logger.info(f"Removing {existing_chunks_count} existing chunks for document {document.id}")
-                DocumentChunk.objects.filter(document=document).delete()
-                # Force a commit to ensure chunks are actually deleted before proceeding
-                transaction.commit()
-                logger.info(f"Successfully deleted all existing chunks for document {document.id}")
+        # CRITICAL: Force delete existing chunks using raw SQL to avoid Django ORM transaction issues
+        # This ensures the deletion is complete before we start adding new chunks
+        try:
+            cursor = connection.cursor()
+            cursor.execute("DELETE FROM knowledge_documentchunk WHERE document_id = %s", [document.id])
+            deleted_count = cursor.rowcount
+            logger.info(f"Successfully deleted {deleted_count} existing chunks for document {document.id} using raw SQL")
+            # Close cursor to release resources
+            cursor.close()
+        except Exception as delete_error:
+            logger.error(f"Error deleting existing chunks for document {document.id}: {delete_error}")
+            # If deletion fails, mark the document as failed and exit
+            document.processing_status = 'failed'
+            document.error_message = f"Failed to prepare document for processing: {str(delete_error)}"
+            document.save(update_fields=['processing_status', 'error_message'])
+            return []
 
         # Extract text from file
         file_path = document.file.path
@@ -184,6 +190,7 @@ def process_document(document_or_id):
         created_chunks = []
         chunk_index = 0
 
+        # Process each extracted text (usually one per page for PDFs)
         for extracted in extracted_texts:
             text = extracted['text']
             page = extracted.get('page', 1)
@@ -201,10 +208,10 @@ def process_document(document_or_id):
                     continue
 
                 # Create embedding vector
-                embedding = create_embedding(chunk_text)
-
                 try:
-                    # Create document chunk
+                    embedding = create_embedding(chunk_text)
+
+                    # Create document chunk - no need for retry logic as we've deleted all existing chunks
                     doc_chunk = DocumentChunk(
                         document=document,
                         content=chunk_text,
@@ -218,9 +225,11 @@ def process_document(document_or_id):
                     doc_chunk.save()
                     created_chunks.append(doc_chunk)
                     chunk_index += 1
+
                 except Exception as chunk_error:
                     logger.error(f"Error creating chunk {chunk_index} for document {document.id}: {chunk_error}")
                     # Continue with the next chunk rather than failing the whole process
+                    chunk_index += 1  # Still increment the index to avoid duplicates
 
         # Update document status
         if created_chunks:
