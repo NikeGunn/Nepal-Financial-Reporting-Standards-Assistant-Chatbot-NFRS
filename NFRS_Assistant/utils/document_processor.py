@@ -134,6 +134,9 @@ def process_document(document_or_id):
         list: List of created DocumentChunk instances
     """
     from api.knowledge.models import DocumentChunk, Document
+    from django.db import transaction
+    import logging
+    logger = logging.getLogger(__name__)
 
     try:
         # Check if the input is a document ID and retrieve the document
@@ -146,9 +149,26 @@ def process_document(document_or_id):
         else:
             document = document_or_id
 
+        # Check if document is already being processed by another thread
+        if document.processing_status == 'processing':
+            logger.warning(f"Document {document.id} is already being processed. Skipping.")
+            return []
+
         # Update document status
         document.processing_status = 'processing'
-        document.save()
+        document.error_message = '' # Clear any previous error messages
+        document.save(update_fields=['processing_status', 'error_message'])
+
+        # Use a transaction for cleaning up existing chunks to ensure atomicity
+        with transaction.atomic():
+            # First clean up any existing chunks to avoid unique constraint violations
+            existing_chunks_count = DocumentChunk.objects.filter(document=document).count()
+            if existing_chunks_count > 0:
+                logger.info(f"Removing {existing_chunks_count} existing chunks for document {document.id}")
+                DocumentChunk.objects.filter(document=document).delete()
+                # Force a commit to ensure chunks are actually deleted before proceeding
+                transaction.commit()
+                logger.info(f"Successfully deleted all existing chunks for document {document.id}")
 
         # Extract text from file
         file_path = document.file.path
@@ -157,7 +177,7 @@ def process_document(document_or_id):
         if not extracted_texts:
             document.processing_status = 'failed'
             document.error_message = "Failed to extract text from document"
-            document.save()
+            document.save(update_fields=['processing_status', 'error_message'])
             return []
 
         # Process each extracted text (usually one per page for PDFs)
@@ -183,36 +203,45 @@ def process_document(document_or_id):
                 # Create embedding vector
                 embedding = create_embedding(chunk_text)
 
-                # Create document chunk
-                doc_chunk = DocumentChunk(
-                    document=document,
-                    content=chunk_text,
-                    chunk_index=chunk_index,
-                    page_number=page
-                )
+                try:
+                    # Create document chunk
+                    doc_chunk = DocumentChunk(
+                        document=document,
+                        content=chunk_text,
+                        chunk_index=chunk_index,
+                        page_number=page
+                    )
 
-                if embedding is not None:
-                    doc_chunk.embedding_vector = embedding.tobytes()
+                    if embedding is not None:
+                        doc_chunk.embedding_vector = embedding.tobytes()
 
-                doc_chunk.save()
-                created_chunks.append(doc_chunk)
-                chunk_index += 1
+                    doc_chunk.save()
+                    created_chunks.append(doc_chunk)
+                    chunk_index += 1
+                except Exception as chunk_error:
+                    logger.error(f"Error creating chunk {chunk_index} for document {document.id}: {chunk_error}")
+                    # Continue with the next chunk rather than failing the whole process
 
         # Update document status
         if created_chunks:
             document.processing_status = 'completed'
+            logger.info(f"Successfully processed document {document.id} with {len(created_chunks)} chunks")
         else:
             document.processing_status = 'failed'
             document.error_message = "No valid text chunks could be extracted"
+            logger.error(f"Failed to create any chunks for document {document.id}")
 
-        document.save()
+        document.save(update_fields=['processing_status', 'error_message'])
         return created_chunks
 
     except Exception as e:
         logger.error(f"Error processing document: {e}")
-        document.processing_status = 'failed'
-        document.error_message = str(e)
-        document.save()
+        try:
+            document.processing_status = 'failed'
+            document.error_message = str(e)[:500]  # Limit error message length
+            document.save(update_fields=['processing_status', 'error_message'])
+        except Exception as nested_e:
+            logger.error(f"Failed to update document status after error: {nested_e}")
         return []
 
 

@@ -167,24 +167,36 @@ class AdminDocumentUploadView(DocumentUploadView):
                 original_max_size = settings.DATA_UPLOAD_MAX_MEMORY_SIZE
                 settings.DATA_UPLOAD_MAX_MEMORY_SIZE = 100 * 1024 * 1024  # 100MB
 
-            # Call the parent class method to handle the upload
-            response = super().post(request)
+            # Process the upload request
+            serializer = DocumentUploadSerializer(data=request.data, context={'request': request})
+            if serializer.is_valid():
+                document = serializer.save()
+
+                # Set document to pending status for background processing
+                document.processing_status = 'pending'
+                document.save()
+
+                # Start background processing in a fully detached manner
+                # Schedule the async processing to happen after the response is sent
+                transaction.on_commit(lambda: process_document_async(document.id))
+
+                # Create the response with status info specifically for API clients
+                response_data = DocumentSerializer(document).data
+                response_data['status'] = 'success'
+                response_data['message'] = 'Document uploaded successfully and is being processed in the background.'
+
+                # Return a standard response without problematic hop-by-hop headers
+                return Response(
+                    response_data,
+                    status=status.HTTP_201_CREATED
+                )
+
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
             # Reset the setting if we changed it
             if hasattr(settings, 'DATA_UPLOAD_MAX_MEMORY_SIZE') and 'original_max_size' in locals():
                 settings.DATA_UPLOAD_MAX_MEMORY_SIZE = original_max_size
 
-            # Add headers to prevent Nginx proxy timeouts
-            # This tells Nginx to not buffer the response and stream it immediately
-            response["X-Accel-Buffering"] = "no"
-            # Set longer keep-alive timeout
-            response["Connection"] = "keep-alive"
-            response["Keep-Alive"] = "timeout=300"
-            # Add additional headers to help with connection stability
-            response["X-Accel-Limit-Rate"] = "0"  # No rate limiting
-
-            # Return the response with the added headers
-            return response
         except Exception as e:
             # Log the error for debugging
             import logging
