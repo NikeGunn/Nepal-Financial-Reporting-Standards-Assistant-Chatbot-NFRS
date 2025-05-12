@@ -99,6 +99,34 @@ class ChatMessageView(APIView):
                 content=message_content
             )
 
+            # Check if query is related to finance/NFRS before processing
+            # This step helps filter out off-topic queries early
+            is_on_topic, confidence = self.check_topic_relevance(message_content)
+
+            if not is_on_topic and confidence > 0.7:
+                # Return a polite off-topic response if the query is clearly not related to finance
+                off_topic_response = (
+                    "I'm specialized in Nepal Financial Reporting Standards (NFRS) and financial reporting topics. "
+                    "I don't have information about that topic. Could you please ask something related to "
+                    "financial reporting, accounting standards, or NFRS?"
+                )
+
+                # Save assistant message
+                assistant_message = Message.objects.create(
+                    conversation=conversation,
+                    role='assistant',
+                    content=off_topic_response
+                )
+
+                # Update conversation's updated_at timestamp
+                conversation.save()
+
+                return Response({
+                    "message": off_topic_response,
+                    "conversation_id": conversation.id,
+                    "sources": []
+                })
+
             # Translate message if needed (from Nepali to English)
             search_query = message_content
             if language == 'ne':
@@ -110,7 +138,7 @@ class ChatMessageView(APIView):
                     search_query = message_content
 
             # Perform vector search to find relevant documents
-            relevant_chunks = self.vector_search(search_query, top_k=3)
+            relevant_chunks = self.vector_search(search_query, top_k=5)  # Increased from 3 to 5 for better context
 
             # Build context from relevant document chunks
             context = ""
@@ -128,14 +156,34 @@ class ChatMessageView(APIView):
                         except Document.DoesNotExist:
                             pass
 
-            # Prepare messages for OpenAI
+            # Prepare messages for OpenAI with enhanced system prompt for better guardrails
+            current_date = settings.CURRENT_DATE if hasattr(settings, 'CURRENT_DATE') else 'not specified'
+
+            system_prompt = (
+                f"You are an NFRS Assistant, specialized in Nepal Financial Reporting Standards and accounting. "
+                f"Always answer based on the provided context. "
+                f"If the answer isn't in the context, apologize and explain you only have knowledge about NFRS and financial reporting topics. "
+                f"Never invent information about NFRS that isn't in the context. "
+                f"Don't mention the specific context in your answer. "
+                f"If asked about unrelated topics (like recipes, entertainment, sports, etc.), politely explain "
+                f"you're only designed to help with financial reporting standards and accounting questions. "
+                f"Today's date is {current_date}."
+            )
+
             messages = [
-                {"role": "system", "content": f"You are an NFRS Assistant, knowledgeable about Nepal Forest Research and Survey. Answer questions based on the provided context. If the answer is not in the context, say you don't know. Don't mention the context directly in your answer. Today's date is {settings.CURRENT_DATE if hasattr(settings, 'CURRENT_DATE') else 'not specified'}."},
+                {"role": "system", "content": system_prompt},
             ]
 
             # Add context if available
             if context:
                 messages.append({"role": "system", "content": context})
+            else:
+                # If no relevant documents found, add a note to be careful with responses
+                messages.append({"role": "system", "content": (
+                    "No specific NFRS document context was found for this query. "
+                    "Please only respond with general financial information if appropriate, "
+                    "and be clear about limitations in your knowledge."
+                )})
 
             # Add conversation history (up to 5 recent messages)
             history_messages = conversation.messages.order_by('-created_at')[:10]
@@ -200,6 +248,53 @@ class ChatMessageView(APIView):
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+    def check_topic_relevance(self, query_text):
+        """
+        Determines if a query is related to finance/NFRS or completely off-topic.
+        Returns a tuple of (is_on_topic, confidence_score).
+        """
+        # Finance-related keywords to check against
+        finance_keywords = [
+            'nfrs', 'nepal financial reporting standard', 'financial', 'reporting', 'accounting',
+            'standard', 'ifrs', 'gaap', 'balance sheet', 'income statement', 'cash flow',
+            'audit', 'tax', 'revenue', 'expense', 'asset', 'liability', 'equity', 'depreciation',
+            'amortization', 'accrual', 'fiscal', 'budget', 'finance', 'debit', 'credit', 'journal',
+            'ledger', 'reconciliation', 'statement', 'disclosure', 'compliance', 'regulation',
+            'nepal', 'financial statement', 'accounting policy', 'profit', 'loss', 'capital',
+            'investment', 'dividend', 'interest', 'loan', 'debt', 'equity', 'shares', 'stock',
+            'ican', 'auditor', 'cpa', 'chartered accountant', 'banking', 'investment'
+        ]
+
+        # Clearly off-topic categories
+        off_topic_keywords = [
+            'recipe', 'cooking', 'movie', 'song', 'actor', 'sports', 'game', 'play',
+            'weather', 'travel', 'vacation', 'hotel', 'flight', 'dating', 'relationship',
+            'exercise', 'workout', 'diet', 'weight', 'fashion', 'clothing', 'restaurant',
+            'gardening', 'plant', 'pet', 'dog', 'cat', 'animal', 'wildlife'
+        ]
+
+        query_lower = query_text.lower()
+
+        # Check for finance-related terms
+        finance_matches = sum(1 for kw in finance_keywords if kw in query_lower)
+
+        # Check for off-topic terms
+        off_topic_matches = sum(1 for kw in off_topic_keywords if kw in query_lower)
+
+        # Simple heuristic algorithm to determine relevance
+        is_finance_related = finance_matches > 0
+        is_clearly_off_topic = off_topic_matches > 0 and finance_matches == 0
+
+        # Confidence calculation (simple version)
+        if is_finance_related:
+            confidence = 0.3 + min(0.7, finance_matches * 0.1)  # Scale with matches but cap at 1.0
+        elif is_clearly_off_topic:
+            confidence = 0.3 + min(0.7, off_topic_matches * 0.1)
+        else:
+            confidence = 0.5  # Neutral when we're not sure
+
+        return (not is_clearly_off_topic, confidence)
+
     def vector_search(self, query, top_k=3):
         """
         Perform vector search using the vector operations utility.
@@ -250,7 +345,7 @@ class ChatMessageView(APIView):
             # This ensures the user still gets some response even without vector search
             logger.info("Falling back to basic keyword search")
             documents = Document.objects.filter(
-                status='processed',
+                processing_status='completed',  # Only use fully processed documents
                 is_deleted=False
             ).order_by('-created_at')[:5]  # Get 5 most recent documents
 
