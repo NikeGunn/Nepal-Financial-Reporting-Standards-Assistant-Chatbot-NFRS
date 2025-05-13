@@ -18,6 +18,7 @@ from api.knowledge.models import Document, DocumentChunk, VectorIndex
 from utils.vector_ops import vector_search as perform_vector_search
 import logging
 
+
 # Add logger
 logger = logging.getLogger(__name__)
 
@@ -107,9 +108,9 @@ class ChatMessageView(APIView):
             if not is_on_topic and confidence > 0.7:
                 # Return a polite off-topic response if the query is clearly not related to finance
                 off_topic_response = (
-                    "I'm specialized in Nepal Financial Reporting Standards (NFRS) and financial reporting topics. "
-                    "I don't have information about that topic. Could you please ask something related to "
-                    "financial reporting, accounting standards, or NFRS?"
+                    "I apologize, but I am specialized in financial reporting, auditing, and accounting matters "
+                    "under NFRS and IFRS. Please ask a question related to finance or auditing, and I’d be happy "
+                    "to assist with professional insights."
                 )
 
                 # Save assistant message
@@ -161,13 +162,26 @@ class ChatMessageView(APIView):
             current_date = settings.CURRENT_DATE if hasattr(settings, 'CURRENT_DATE') else 'not specified'
 
             system_prompt = (
-                f"You are an NFRS Assistant, specialized in Nepal Financial Reporting Standards and accounting. "
-                f"Always answer based on the provided context. "
-                f"If the answer isn't in the context, apologize and explain you only have knowledge about NFRS and financial reporting topics. "
-                f"Never invent information about NFRS that isn't in the context. "
-                f"Don't mention the specific context in your answer. "
-                f"If asked about unrelated topics (like recipes, entertainment, sports, etc.), politely explain "
-                f"you're only designed to help with financial reporting standards and accounting questions. "
+                "You are an expert Chartered Accountant and Licensed Auditor in Nepal, with over 15 years of experience "
+                "in financial reporting, auditing, and strategic financial advisory. Your expertise spans Nepal Financial "
+                "Reporting Standards (NFRS), International Financial Reporting Standards (IFRS), Nepal Rastra Bank "
+                "regulations, and global auditing standards (ISA). You are part of a RAG-based application that uses "
+                "FAISS for vector embeddings to retrieve relevant financial documents, balance sheets, profit & loss "
+                "statements, and audit reports.\n\n"
+                "Core Responsibilities:\n"
+                "1. Answer financial queries (e.g., balance sheets, profit & loss, financial ratios) with precision and "
+                "compliance to NFRS/IFRS.\n"
+                "2. Analyze audit reports for compliance, identify issues (e.g., non-compliance, weak controls), and "
+                "suggest corrections.\n"
+                "3. Provide proactive recommendations to improve profitability, optimize taxes, or mitigate risks.\n"
+                "4. Politely decline non-financial queries with: 'I apologize, but I am specialized in financial "
+                "reporting, auditing, and accounting matters under NFRS and IFRS.'\n\n"
+                "Response Guidelines:\n"
+                "- Base answers on provided context or uploaded documents.\n"
+                "- Use formal, professional language suitable for CFOs and auditors.\n"
+                "- Structure complex responses with Analysis, Issues Identified, and Recommendations.\n"
+                "- Provide predictive insights (e.g., 'High receivables may lead to losses in 2 months').\n"
+                "- Cite NFRS/IFRS standards where applicable.\n"
                 f"Today's date is {current_date}."
             )
 
@@ -181,7 +195,7 @@ class ChatMessageView(APIView):
             else:
                 # If no relevant documents found, add a note to be careful with responses
                 messages.append({"role": "system", "content": (
-                    "No specific NFRS document context was found for this query. "
+                    "No specific NFRS/IFRS document context was found for this query. "
                     "Please only respond with general financial information if appropriate, "
                     "and be clear about limitations in your knowledge."
                 )})
@@ -256,6 +270,8 @@ class ChatMessageView(APIView):
         """
         # Finance-related keywords to check against
         finance_keywords = [
+            'nfrs', 'ifrs', 'balance sheet', 'profit', 'loss', 'audit', 'tax', 'revenue', 'expense',
+            'asset', 'liability', 'equity', 'depreciation', 'financial statement', 'compliance',
             'nfrs', 'nepal financial reporting standard', 'financial', 'reporting', 'accounting',
             'standard', 'ifrs', 'gaap', 'balance sheet', 'income statement', 'cash flow',
             'audit', 'tax', 'revenue', 'expense', 'asset', 'liability', 'equity', 'depreciation',
@@ -268,6 +284,7 @@ class ChatMessageView(APIView):
 
         # Clearly off-topic categories
         off_topic_keywords = [
+            'recipe', 'movie', 'sports', 'weather', 'travel', 'fashion', 'pet', 'game',
             'recipe', 'cooking', 'movie', 'song', 'actor', 'sports', 'game', 'play',
             'weather', 'travel', 'vacation', 'hotel', 'flight', 'dating', 'relationship',
             'exercise', 'workout', 'diet', 'weight', 'fashion', 'clothing', 'restaurant',
