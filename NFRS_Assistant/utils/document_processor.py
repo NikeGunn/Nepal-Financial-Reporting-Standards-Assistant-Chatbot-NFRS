@@ -11,6 +11,9 @@ from utils.vector_ops import create_embedding
 
 logger = logging.getLogger(__name__)
 
+# Add a process lock dictionary to prevent concurrent processing of the same document
+_document_process_locks = {}
+_process_lock = threading.Lock()
 
 def extract_text_from_file(file_path):
     """
@@ -140,41 +143,51 @@ def process_document(document_or_id):
 
     try:
         # Check if the input is a document ID and retrieve the document
+        document_id = None
         if isinstance(document_or_id, (int, str)):
+            document_id = document_or_id
             try:
-                document = Document.objects.get(id=document_or_id)
+                document = Document.objects.select_for_update().get(id=document_id)
             except Document.DoesNotExist:
-                logger.error(f"Document with ID {document_or_id} not found")
+                logger.error(f"Document with ID {document_id} not found")
                 return []
         else:
             document = document_or_id
+            document_id = document.id
 
-        # Check if document is already being processed by another thread
-        if document.processing_status == 'processing':
-            logger.warning(f"Document {document.id} is already being processed. Skipping.")
-            return []
+        # Use database transaction to ensure atomicity
+        with transaction.atomic():
+            # Requery to get the latest state with a lock
+            document = Document.objects.select_for_update().get(id=document_id)
 
-        # Update document status
-        document.processing_status = 'processing'
-        document.error_message = ''  # Clear any previous error messages
-        document.save(update_fields=['processing_status', 'error_message'])
+            # Check if document is already being processed by another thread
+            if document.processing_status == 'processing':
+                logger.warning(f"Document {document.id} is already being processed. Skipping.")
+                return []
 
-        # CRITICAL: Force delete existing chunks using raw SQL to avoid Django ORM transaction issues
-        # This ensures the deletion is complete before we start adding new chunks
-        try:
-            cursor = connection.cursor()
-            cursor.execute("DELETE FROM knowledge_documentchunk WHERE document_id = %s", [document.id])
-            deleted_count = cursor.rowcount
-            logger.info(f"Successfully deleted {deleted_count} existing chunks for document {document.id} using raw SQL")
-            # Close cursor to release resources
-            cursor.close()
-        except Exception as delete_error:
-            logger.error(f"Error deleting existing chunks for document {document.id}: {delete_error}")
-            # If deletion fails, mark the document as failed and exit
-            document.processing_status = 'failed'
-            document.error_message = f"Failed to prepare document for processing: {str(delete_error)}"
+            # Update document status
+            document.processing_status = 'processing'
+            document.error_message = ''  # Clear any previous error messages
             document.save(update_fields=['processing_status', 'error_message'])
-            return []
+
+            # CRITICAL: Force delete existing chunks using raw SQL to avoid Django ORM transaction issues
+            # This ensures the deletion is complete before we start adding new chunks
+            try:
+                cursor = connection.cursor()
+                cursor.execute("DELETE FROM knowledge_documentchunk WHERE document_id = %s", [document.id])
+                deleted_count = cursor.rowcount
+                logger.info(f"Successfully deleted {deleted_count} existing chunks for document {document.id} using raw SQL")
+                # Close cursor to release resources
+                cursor.close()
+            except Exception as delete_error:
+                logger.error(f"Error deleting existing chunks for document {document.id}: {delete_error}")
+                # If deletion fails, mark the document as failed and exit
+                document.processing_status = 'failed'
+                document.error_message = f"Failed to prepare document for processing: {str(delete_error)}"
+                document.save(update_fields=['processing_status', 'error_message'])
+                return []
+
+        # After the transaction completes, process the document
 
         # Extract text from file
         file_path = document.file.path
@@ -211,20 +224,39 @@ def process_document(document_or_id):
                 try:
                     embedding = create_embedding(chunk_text)
 
-                    # Create document chunk - no need for retry logic as we've deleted all existing chunks
-                    doc_chunk = DocumentChunk(
-                        document=document,
-                        content=chunk_text,
-                        chunk_index=chunk_index,
-                        page_number=page
-                    )
+                    # Handle potential integrity errors with retries
+                    max_retries = 3
+                    retry_count = 0
+                    success = False
 
-                    if embedding is not None:
-                        doc_chunk.embedding_vector = embedding.tobytes()
+                    while not success and retry_count < max_retries:
+                        try:
+                            # Create document chunk
+                            doc_chunk = DocumentChunk(
+                                document=document,
+                                content=chunk_text,
+                                chunk_index=chunk_index,
+                                page_number=page
+                            )
 
-                    doc_chunk.save()
-                    created_chunks.append(doc_chunk)
-                    chunk_index += 1
+                            if embedding is not None:
+                                doc_chunk.embedding_vector = embedding.tobytes()
+
+                            doc_chunk.save()
+                            created_chunks.append(doc_chunk)
+                            chunk_index += 1
+                            success = True
+
+                        except IntegrityError as integrity_error:
+                            # If we hit a unique constraint, try the next index
+                            logger.warning(f"Integrity error for chunk {chunk_index}, trying next index: {integrity_error}")
+                            chunk_index += 1
+                            retry_count += 1
+
+                        except Exception as save_error:
+                            logger.error(f"Error saving chunk {chunk_index}: {save_error}")
+                            chunk_index += 1
+                            break
 
                 except Exception as chunk_error:
                     logger.error(f"Error creating chunk {chunk_index} for document {document.id}: {chunk_error}")
@@ -246,6 +278,9 @@ def process_document(document_or_id):
     except Exception as e:
         logger.error(f"Error processing document: {e}")
         try:
+            # Get the document if we only have the ID
+            if isinstance(document_or_id, (int, str)):
+                document = Document.objects.get(id=document_or_id)
             document.processing_status = 'failed'
             document.error_message = str(e)[:500]  # Limit error message length
             document.save(update_fields=['processing_status', 'error_message'])
@@ -258,10 +293,17 @@ def process_document(document_or_id):
 def process_document_async(document_id):
     """
     Process a document asynchronously in a separate thread.
+    Ensures only one thread processes a specific document at a time.
 
     Args:
         document_id: ID of the document to process
     """
+    # Check if this document is already being processed
+    with _process_lock:
+        if document_id in _document_process_locks and _document_process_locks[document_id].is_alive():
+            logger.warning(f"Document {document_id} is already being processed in another thread. Skipping.")
+            return None
+
     def _worker():
         try:
             logger.info(f"Starting background processing for document {document_id}")
@@ -269,9 +311,19 @@ def process_document_async(document_id):
             logger.info(f"Completed background processing for document {document_id}")
         except Exception as e:
             logger.error(f"Error in async document processing for document {document_id}: {str(e)}")
+        finally:
+            # Clean up the lock when done
+            with _process_lock:
+                if document_id in _document_process_locks:
+                    del _document_process_locks[document_id]
 
     # Start processing in a daemon thread to avoid blocking
     thread = threading.Thread(target=_worker)
     thread.daemon = True
+
+    # Register this thread in our locks dictionary
+    with _process_lock:
+        _document_process_locks[document_id] = thread
+
     thread.start()
     return thread
