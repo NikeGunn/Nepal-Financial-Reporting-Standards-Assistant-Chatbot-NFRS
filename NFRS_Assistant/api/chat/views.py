@@ -8,6 +8,7 @@ from openai import OpenAI  # Add import for new OpenAI client
 import json
 import numpy as np
 from google.cloud import translate_v2 as translate
+from django.contrib.auth.models import User
 from .models import Conversation, Message
 from .serializers import (
     ConversationListSerializer, ConversationDetailSerializer,
@@ -451,3 +452,34 @@ class TranslateMessageView(APIView):
                 )
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class UserConversationsView(generics.ListAPIView):
+    """
+    API endpoint for fetching conversations by username.
+    This allows frontends to retrieve conversations for a specific user.
+    """
+    serializer_class = ConversationListSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        # Get the username from the query parameters
+        username = self.request.query_params.get('username', None)
+
+        # Default to current user if no username provided
+        if not username:
+            return Conversation.objects.filter(user=self.request.user)
+
+        # Check if the requesting user has admin permissions
+        if not hasattr(self.request.user, 'profile') or not self.request.user.profile.is_admin:
+            # Non-admin users can only see their own conversations
+            if username != self.request.user.username:
+                return Conversation.objects.none()
+            return Conversation.objects.filter(user=self.request.user)
+
+        # Admin users can see conversations for any user
+        try:
+            user = User.objects.get(username=username)
+            return Conversation.objects.filter(user=user)
+        except User.DoesNotExist:
+            return Conversation.objects.none()
