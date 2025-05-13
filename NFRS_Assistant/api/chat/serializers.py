@@ -1,6 +1,17 @@
 from rest_framework import serializers
+from django.contrib.auth.models import User
 from .models import Conversation, Message
 from api.knowledge.models import Document
+
+class UserBasicSerializer(serializers.ModelSerializer):
+    """
+    Simple serializer for basic user information.
+    """
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'first_name', 'last_name', 'email']
+        read_only_fields = fields
+
 
 class MessageSerializer(serializers.ModelSerializer):
     """
@@ -23,14 +34,34 @@ class ConversationListSerializer(serializers.ModelSerializer):
     Serializer for listing conversations.
     """
     message_count = serializers.SerializerMethodField()
+    user = UserBasicSerializer(read_only=True)
+    last_message = serializers.SerializerMethodField()
+    last_activity = serializers.SerializerMethodField()
 
     class Meta:
         model = Conversation
-        fields = ['id', 'title', 'language', 'created_at', 'updated_at', 'is_active', 'message_count']
+        fields = ['id', 'title', 'language', 'created_at', 'updated_at', 'is_active',
+                  'message_count', 'user', 'last_message', 'last_activity']
         read_only_fields = ['id', 'created_at', 'updated_at']
 
     def get_message_count(self, obj):
         return obj.messages.count()
+
+    def get_last_message(self, obj):
+        """Return a preview of the last message in the conversation."""
+        last_message = obj.messages.order_by('-created_at').first()
+        if last_message:
+            return {
+                'id': last_message.id,
+                'role': last_message.role,
+                'content_preview': last_message.content[:100] + ('...' if len(last_message.content) > 100 else ''),
+                'created_at': last_message.created_at
+            }
+        return None
+
+    def get_last_activity(self, obj):
+        """Return the timestamp of the last activity in this conversation."""
+        return obj.updated_at
 
 
 class ConversationDetailSerializer(serializers.ModelSerializer):
@@ -38,10 +69,11 @@ class ConversationDetailSerializer(serializers.ModelSerializer):
     Serializer for conversation details including messages.
     """
     messages = MessageSerializer(many=True, read_only=True)
+    user = UserBasicSerializer(read_only=True)
 
     class Meta:
         model = Conversation
-        fields = ['id', 'title', 'language', 'created_at', 'updated_at', 'is_active', 'messages']
+        fields = ['id', 'title', 'language', 'created_at', 'updated_at', 'is_active', 'user', 'messages']
         read_only_fields = ['id', 'created_at', 'updated_at']
 
 
