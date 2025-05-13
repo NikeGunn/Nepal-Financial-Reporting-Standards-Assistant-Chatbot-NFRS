@@ -196,10 +196,10 @@ class AdminDocumentUploadView(DocumentUploadView):
                 # Set document to pending status for background processing
                 document.processing_status = 'pending'
                 document.save()
-                
-                # Import the processor utility directly 
+
+                # Import the processor utility directly
                 from utils.document_processor import process_document_async
-                
+
                 # Use a unique identifier for tracking this processing job
                 process_id = uuid.uuid4().hex[:8]
                 logger.info(f"Admin document upload: Scheduling document {document.id} '{document.title}' for processing with ID: {process_id}")

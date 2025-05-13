@@ -16,10 +16,16 @@ logger = logging.getLogger(__name__)
 class DocumentChunkInline(admin.TabularInline):
     model = DocumentChunk
     extra = 0
-    readonly_fields = ('created_at', 'embedding_vector')
+    readonly_fields = ('chunk_index', 'page_number', 'content', 'created_at', 'embedding_vector')
     fields = ('chunk_index', 'page_number', 'content', 'created_at')
     can_delete = False
     max_num = 10  # Limit the number of chunks shown
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(Document)
@@ -30,7 +36,19 @@ class DocumentAdmin(admin.ModelAdmin):
     search_fields = ('title', 'description', 'uploaded_by__username')
     readonly_fields = ('created_at', 'updated_at', 'processing_status', 'error_message')
     date_hierarchy = 'created_at'
-    inlines = [DocumentChunkInline]
+
+    def get_inlines(self, request, obj=None):
+        """Only include document chunks in the detail view if the document has a reasonable number of chunks."""
+        if obj is None:  # This is an add form
+            return []
+
+        # Count the number of chunks for this document
+        chunk_count = DocumentChunk.objects.filter(document=obj).count()
+
+        # If the document has too many chunks, don't show any inline chunks to avoid performance issues
+        if chunk_count > 200:  # This threshold can be adjusted based on your needs
+            return []
+        return [DocumentChunkInline]
 
     def get_urls(self):
         urls = super().get_urls()
