@@ -153,10 +153,13 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_CLASSES': [
         'rest_framework.throttling.AnonRateThrottle',
         'rest_framework.throttling.UserRateThrottle',
+        'rest_framework.throttling.ScopedRateThrottle',
     ],
     'DEFAULT_THROTTLE_RATES': {
         'anon': '100/day',
         'user': '1000/day',
+        'auth': '1000/hour',        # Added higher limit for auth endpoints
+        'token_refresh': '100/hour', # Special rate for token refresh
     },
     'EXCEPTION_HANDLER': 'utils.exceptions.custom_exception_handler',
 }

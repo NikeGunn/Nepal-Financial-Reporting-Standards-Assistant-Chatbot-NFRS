@@ -8,6 +8,7 @@ from .serializers import (
     UserSerializer, UserProfileSerializer, UserRegistrationSerializer,
     ApiKeySerializer, ChangePasswordSerializer
 )
+from utils.throttling import AuthRateThrottle
 
 
 class UserRegistrationView(generics.CreateAPIView):
@@ -16,6 +17,7 @@ class UserRegistrationView(generics.CreateAPIView):
     """
     serializer_class = UserRegistrationSerializer
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [AuthRateThrottle]  # Apply the same auth throttling to registration
 
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
