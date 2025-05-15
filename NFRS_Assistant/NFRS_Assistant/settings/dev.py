@@ -32,3 +32,11 @@ INTERNAL_IPS = [
 
 # Email backend for development
 EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+
+# Override throttle rates for development with much more permissive values
+REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] = {
+    'anon': '1000/day',        # Increased from 100/day
+    'user': '5000/day',        # Increased from 1000/day
+    'auth': '1000/hour',
+    'token_refresh': '500/hour' # Increased from 100/hour
+}
