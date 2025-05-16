@@ -31,6 +31,7 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt',
     'drf_yasg',
     'corsheaders',  # Add CORS headers support
+    'channels',     # Add Django Channels for WebSocket support
 
     # Local apps
     'api',
@@ -70,6 +71,14 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'NFRS_Assistant.wsgi.application'
+ASGI_APPLICATION = 'NFRS_Assistant.asgi.application'  # Add ASGI application for Channels
+
+# Channel Layers configuration
+CHANNEL_LAYERS = {
+    'default': {
+        'BACKEND': 'channels.layers.InMemoryChannelLayer',
+    },
+}
 
 # Database
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases

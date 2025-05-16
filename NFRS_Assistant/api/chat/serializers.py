@@ -84,6 +84,22 @@ class ChatMessageSerializer(serializers.Serializer):
     message = serializers.CharField(required=True)
     conversation_id = serializers.IntegerField(required=False, allow_null=True)
     language = serializers.CharField(required=False, default='en')
+    use_multi_agent = serializers.BooleanField(required=False, default=True)
+
+    def validate_message(self, value):
+        """Validate that the message isn't empty."""
+        if not value.strip():
+            raise serializers.ValidationError("Message cannot be empty")
+        return value
+
+    def validate_language(self, value):
+        """Validate that the language is supported."""
+        supported_languages = ['en', 'ne']  # English and Nepali
+        if value not in supported_languages:
+            raise serializers.ValidationError(
+                f"Language '{value}' is not supported. Supported languages: {', '.join(supported_languages)}"
+            )
+        return value
 
 
 class TranslateMessageSerializer(serializers.Serializer):

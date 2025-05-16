@@ -26,3 +26,7 @@ wheel>=0.38.4
 scikit-learn>=1.3.0
 langchain>=0.1.0
 langchain-openai>=0.0.1
+# Added Django Channels and related packages
+channels>=4.0.0
+daphne>=4.0.0
+channels-redis>=4.1.0

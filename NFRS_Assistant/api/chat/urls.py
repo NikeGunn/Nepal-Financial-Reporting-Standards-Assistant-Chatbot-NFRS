@@ -1,16 +1,20 @@
 from django.urls import path
+from rest_framework.routers import DefaultRouter
 from . import views
 
+router = DefaultRouter()
+router.register(r'conversations', views.ConversationViewSet, basename='conversation')
+
 urlpatterns = [
-    # Conversation management
-    path('conversations/', views.ConversationListCreateView.as_view(), name='conversation_list'),
-    path('conversations/<int:pk>/', views.ConversationDetailView.as_view(), name='conversation_detail'),
-    path('user-conversations/', views.UserConversationsView.as_view(), name='user_conversations'),
+    # Chat messages
+    path('messages/', views.ChatMessageView.as_view({'post': 'create'}), name='chat_message'),
+    path('messages/translate/', views.ChatMessageView.as_view({'post': 'translate'}), name='translate_message'),
 
-    # Chat messaging
-    path('messages/', views.ChatMessageView.as_view(), name='chat_message'),
-    path('messages/<int:pk>/', views.MessageDetailView.as_view(), name='message_detail'),
+    # Add compatibility URL for ConversationListCreateView
+    path('conversations-list/', views.ConversationListCreateView.as_view(), name='conversation-list-create'),
 
-    # Translation
-    path('translate/', views.TranslateMessageView.as_view(), name='translate_message'),
+    # User conversations endpoint
+    path('user-conversations/', views.ConversationViewSet.as_view({'get': 'list'}), name='user-conversations'),
 ]
+
+urlpatterns += router.urls
