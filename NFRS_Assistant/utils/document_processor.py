@@ -144,6 +144,7 @@ def fast_process_document(document_id, max_pages=2, max_chunks=5):
         bool: Success status
     """
     from api.knowledge.models import DocumentChunk, Document
+    import uuid  # Add import for UUID generation
 
     try:
         # Get the document
@@ -185,7 +186,6 @@ def fast_process_document(document_id, max_pages=2, max_chunks=5):
 
         # Process extracted text
         chunks_created = 0
-        chunk_index = 0
         all_chunks = []
 
         for extracted in extracted_texts:
@@ -206,21 +206,29 @@ def fast_process_document(document_id, max_pages=2, max_chunks=5):
                 # Create embedding
                 embedding = create_embedding(chunk_text)
 
+                # Generate a unique chunk index using a combination of timestamp and random UUID
+                # This ensures we don't conflict with regular chunk indexes or other fast-processed chunks
+                unique_chunk_id = int.from_bytes(uuid.uuid4().bytes[:4], byteorder='big') + 1000000
+
                 # Create chunk
-                doc_chunk = DocumentChunk(
-                    document=document,
-                    content=chunk_text,
-                    chunk_index=10000 + chunk_index,  # Use high index to avoid conflicts with full processing
-                    page_number=page
-                )
+                try:
+                    doc_chunk = DocumentChunk(
+                        document=document,
+                        content=chunk_text,
+                        chunk_index=unique_chunk_id,  # Use unique ID instead of sequential index
+                        page_number=page
+                    )
 
-                if embedding is not None:
-                    doc_chunk.embedding_vector = embedding.tobytes()
+                    if embedding is not None:
+                        doc_chunk.embedding_vector = embedding.tobytes()
 
-                doc_chunk.save()
-                all_chunks.append(doc_chunk)
-                chunks_created += 1
-                chunk_index += 1
+                    doc_chunk.save()
+                    all_chunks.append(doc_chunk)
+                    chunks_created += 1
+                except Exception as e:
+                    # Log the error but continue processing other chunks
+                    logger.error(f"Error saving fast-processed chunk for document {document_id}: {str(e)}")
+                    continue
 
                 # Break if we've reached the maximum number of chunks
                 if chunks_created >= max_chunks:
@@ -427,7 +435,12 @@ def process_document_async(document_id):
     """
     # First do quick processing for immediate availability
     try:
-        fast_process_document(document_id)
+        # Skip fast processing if it's already been processed to avoid the constraint error
+        from api.knowledge.models import DocumentChunk
+        if not DocumentChunk.objects.filter(document_id=document_id).exists():
+            fast_process_document(document_id)
+        else:
+            logger.info(f"Document {document_id} has existing chunks. Skipping fast processing.")
     except Exception as e:
         logger.error(f"Error in fast document processing: {e}")
 
@@ -461,3 +474,241 @@ def process_document_async(document_id):
 
     thread.start()
     return thread
+
+
+# Function to process browser session documents
+def process_session_document(file_path, session_id, chat_id=None, title=None, user=None):
+    """
+    Process a document uploaded within a browser session, without storing in the database.
+    This is for temporary document handling that's tied to a specific chat session.
+
+    Args:
+        file_path (str): Path to the temporary document file
+        session_id (str): Browser session identifier
+        chat_id (str, optional): Chat ID if the document is tied to a specific conversation
+        title (str, optional): Document title
+        user (User, optional): User who uploaded the document
+
+    Returns:
+        SessionDocument: The created session document or None if processing failed
+    """
+    from api.knowledge.models import SessionDocument, SessionDocumentChunk
+    import uuid
+
+    try:
+        # Extract file type
+        file_extension = os.path.splitext(file_path)[1].lower().replace('.', '')
+        mime_type = magic.from_file(file_path, mime=True)
+
+        if file_extension not in ['pdf', 'txt', 'docx']:
+            if 'pdf' in mime_type:
+                file_extension = 'pdf'
+            elif 'text/plain' in mime_type:
+                file_extension = 'txt'
+            elif 'docx' in mime_type or 'word' in mime_type:
+                file_extension = 'docx'
+            else:
+                logger.error(f"Unsupported file type for session document: {mime_type}")
+                return None
+
+        # Generate a title if not provided
+        if not title:
+            title = os.path.basename(file_path)
+
+        # Extract text from the document
+        extracted_texts = extract_text_from_file(file_path)
+        if not extracted_texts:
+            logger.error(f"Failed to extract text from session document: {file_path}")
+            return None
+
+        # Create a content preview
+        content_preview = ""
+        for text_data in extracted_texts[:2]:  # Just use first couple of pages for preview
+            content_preview += text_data['text'][:250]
+            if len(content_preview) >= 250:
+                content_preview = content_preview[:250] + "..."
+                break
+
+        # Create the session document
+        session_doc = SessionDocument.objects.create(
+            title=title,
+            content_preview=content_preview,
+            session_id=session_id,
+            chat_id=chat_id,
+            file_type=file_extension,
+            uploaded_by=user
+        )
+
+        # Process each extracted text into chunks with embeddings
+        chunks_created = 0
+
+        for idx, extracted in enumerate(extracted_texts):
+            text = extracted['text']
+            page = extracted.get('page', idx + 1)
+
+            if not text.strip():
+                continue
+
+            # Split text into chunks
+            chunks = create_text_chunks(text)
+
+            # Create chunks with embeddings
+            for chunk_idx, chunk_text in enumerate(chunks):
+                if not chunk_text.strip():
+                    continue
+
+                # Generate embedding
+                try:
+                    embedding = create_embedding(chunk_text)
+
+                    # Create the session document chunk
+                    chunk = SessionDocumentChunk(
+                        session_document=session_doc,
+                        content=chunk_text,
+                        chunk_index=chunks_created,
+                        page_number=page
+                    )
+
+                    if embedding is not None:
+                        chunk.embedding_vector = embedding.tobytes()
+
+                    chunk.save()
+                    chunks_created += 1
+
+                except Exception as chunk_error:
+                    logger.error(f"Error processing session document chunk: {str(chunk_error)}")
+                    # Continue with other chunks
+                    continue
+
+        logger.info(f"Successfully processed session document: {session_doc.id} with {chunks_created} chunks")
+        return session_doc
+
+    except Exception as e:
+        logger.error(f"Error processing session document: {str(e)}")
+        return None
+
+
+def vector_search_session_documents(query_text, session_id, chat_id=None, top_k=3):
+    """
+    Search for relevant content in session documents using vector similarity.
+
+    Args:
+        query_text (str): The query text to search for
+        session_id (str): Browser session identifier
+        chat_id (str, optional): Specific chat ID to filter documents
+        top_k (int): Maximum number of results to return
+
+    Returns:
+        list: List of relevant document chunks with similarity scores
+    """
+    from api.knowledge.models import SessionDocumentChunk
+    import numpy as np
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    try:
+        # Generate query embedding
+        query_embedding = create_embedding(query_text)
+        if query_embedding is None:
+            logger.error("Failed to create query embedding")
+            return []
+
+        # Find all session document chunks for this session
+        filter_kwargs = {"session_document__session_id": session_id}
+        if chat_id:
+            filter_kwargs["session_document__chat_id"] = chat_id
+
+        chunks = SessionDocumentChunk.objects.filter(
+            **filter_kwargs,
+            embedding_vector__isnull=False
+        )
+
+        if not chunks:
+            return []
+
+        # Calculate similarities
+        results = []
+        for chunk in chunks:
+            chunk_embedding = np.frombuffer(chunk.embedding_vector, dtype=np.float32)
+            similarity = cosine_similarity(
+                [query_embedding],
+                [chunk_embedding]
+            )[0][0]
+
+            results.append({
+                'chunk_id': chunk.id,
+                'document_id': chunk.session_document_id,
+                'document_title': chunk.session_document.title,
+                'content': chunk.content,
+                'page_number': chunk.page_number,
+                'similarity': float(similarity)
+            })
+
+        # Sort by similarity and return top_k results
+        sorted_results = sorted(results, key=lambda x: x['similarity'], reverse=True)
+        return sorted_results[:top_k]
+
+    except Exception as e:
+        logger.error(f"Error in session document vector search: {str(e)}")
+        return []
+
+
+def cleanup_session_documents(session_id=None, chat_id=None, older_than_days=None):
+    """
+    Clean up temporary session documents.
+
+    Args:
+        session_id (str, optional): Clean up documents for a specific session
+        chat_id (str, optional): Clean up documents for a specific chat
+        older_than_days (int, optional): Clean up documents older than specified days
+
+    Returns:
+        int: Number of documents deleted
+    """
+    from api.knowledge.models import SessionDocument, SessionDocumentChunk
+    from django.utils import timezone
+    from django.db import transaction, connection
+    from datetime import timedelta
+
+    try:
+        # Build filter criteria
+        filter_kwargs = {}
+        if session_id:
+            filter_kwargs['session_id'] = session_id
+        if chat_id:
+            filter_kwargs['chat_id'] = chat_id
+        if older_than_days:
+            cutoff_date = timezone.now() - timedelta(days=older_than_days)
+            filter_kwargs['created_at__lt'] = cutoff_date
+
+        # Use a transaction to ensure atomicity
+        with transaction.atomic():
+            # First, get IDs of documents to be deleted
+            doc_ids_to_delete = list(SessionDocument.objects.filter(**filter_kwargs).values_list('id', flat=True))
+            
+            if not doc_ids_to_delete:
+                logger.info(f"No session documents found to delete with filters: {filter_kwargs}")
+                return 0
+                
+            # Use raw SQL to delete chunks first to handle potential race conditions
+            if doc_ids_to_delete:
+                try:
+                    cursor = connection.cursor()
+                    # Convert list to string for SQL IN clause
+                    doc_ids_str = ','.join(map(str, doc_ids_to_delete))
+                    # Delete all chunks associated with these documents
+                    cursor.execute(f"DELETE FROM knowledge_sessiondocumentchunk WHERE session_document_id IN ({doc_ids_str})")
+                    chunks_deleted = cursor.rowcount
+                    cursor.close()
+                    logger.info(f"Deleted {chunks_deleted} session document chunks for documents {doc_ids_to_delete}")
+                except Exception as e:
+                    logger.error(f"Error deleting session document chunks: {e}")
+            
+            # Now delete the documents
+            deleted_count = SessionDocument.objects.filter(id__in=doc_ids_to_delete).delete()[0]
+            logger.info(f"Deleted {deleted_count} session documents with IDs: {doc_ids_to_delete}")
+            
+            return deleted_count
+
+    except Exception as e:
+        logger.error(f"Error cleaning up session documents: {str(e)}")
+        return 0

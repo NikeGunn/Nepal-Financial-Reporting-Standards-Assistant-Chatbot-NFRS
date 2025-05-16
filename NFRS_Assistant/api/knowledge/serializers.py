@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Document, DocumentChunk, VectorIndex
+from .models import Document, DocumentChunk, VectorIndex, SessionDocument, SessionDocumentChunk
 
 
 class DocumentChunkSerializer(serializers.ModelSerializer):
@@ -103,3 +103,55 @@ class SearchQuerySerializer(serializers.Serializer):
         required=False,
         allow_empty=True
     )
+
+
+class SessionDocumentChunkSerializer(serializers.ModelSerializer):
+    """
+    Serializer for session-based document chunks.
+    """
+    class Meta:
+        model = SessionDocumentChunk
+        fields = ['id', 'session_document', 'content', 'chunk_index', 'page_number', 'created_at']
+        read_only_fields = ['id', 'created_at']
+
+
+class SessionDocumentSerializer(serializers.ModelSerializer):
+    """
+    Serializer for session-based documents.
+    """
+    chunks = SessionDocumentChunkSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = SessionDocument
+        fields = ['id', 'title', 'content_preview', 'session_id', 'chat_id', 'file_type', 'uploaded_by', 'created_at', 'chunks']
+        read_only_fields = ['id', 'content_preview', 'created_at']
+
+
+class SessionDocumentUploadSerializer(serializers.ModelSerializer):
+    """
+    Serializer for session-based document uploads.
+    """
+    file = serializers.FileField(write_only=True)
+
+    class Meta:
+        model = SessionDocument
+        fields = ['title', 'session_id', 'chat_id', 'file_type', 'file']
+
+    def validate_file(self, value):
+        # Validate file type and size
+        file_extension = value.name.split('.')[-1].lower()
+        if file_extension not in ['pdf', 'txt', 'docx']:
+            raise serializers.ValidationError("Unsupported file type. Please upload PDF, TXT, or DOCX files.")
+
+        # Check file size (10MB limit)
+        if value.size > 10 * 1024 * 1024:
+            raise serializers.ValidationError("File is too large. Maximum size is 10MB.")
+
+        return value
+
+    def validate_file_type(self, value):
+        # This is optional since we determine file type from the actual file
+        # but we validate it if provided
+        if value not in ['pdf', 'txt', 'docx']:
+            raise serializers.ValidationError("Supported file types are: pdf, txt, docx")
+        return value

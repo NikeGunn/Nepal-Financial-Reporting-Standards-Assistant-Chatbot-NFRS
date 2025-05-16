@@ -15,13 +15,19 @@ import pickle
 import subprocess
 import threading
 import logging  # Added import for logging
+import tempfile
 from sklearn.metrics.pairwise import cosine_similarity
-from .models import Document, DocumentChunk, VectorIndex
+from .models import Document, DocumentChunk, VectorIndex, SessionDocument, SessionDocumentChunk
 from .serializers import (
     DocumentSerializer, DocumentChunkSerializer, DocumentUploadSerializer,
-    VectorIndexSerializer, SearchQuerySerializer
+    VectorIndexSerializer, SearchQuerySerializer, SessionDocumentSerializer,
+    SessionDocumentUploadSerializer
 )
 from utils.vector_ops import create_embedding, update_index_with_chunks, vector_search
+from utils.document_processor import (
+    process_document_async, process_session_document,
+    vector_search_session_documents, cleanup_session_documents
+)
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -56,6 +62,172 @@ def process_document_async(document_id):
                 document.save()
             except Exception as nested_error:
                 print(f"Failed to update document status after error: {nested_error}")
+
+    # Start background thread and detach it
+    thread = threading.Thread(target=run_processing)
+    thread.daemon = True  # Thread will terminate when main program exits
+    thread.start()
+
+    # Return thread handle for testing/debugging
+    return thread
+
+def process_session_document_async(file_path, session_id, chat_id=None, title=None, user=None, document_id=None):
+    """Run session document processing in a separate thread."""
+    def run_processing():
+        # Create a separate database connection for this thread to avoid connection sharing issues
+        from django.db import connection, DatabaseError
+        connection.close()  # Close the connection shared from the main thread
+
+        try:
+            from utils.document_processor import extract_text_from_file, create_text_chunks, create_embedding
+            from .models import SessionDocument, SessionDocumentChunk
+            from django.db.models import ObjectDoesNotExist
+
+            # If we have a document_id, we need to update the existing document
+            if document_id:
+                try:
+                    # First check if document still exists before doing any processing
+                    try:
+                        # Use a separate transaction to verify document existence
+                        session_doc = SessionDocument.objects.get(id=document_id)
+                    except (ObjectDoesNotExist, DatabaseError):
+                        # Document has been deleted, stop processing
+                        logger.info(f"Skipping processing for deleted document ID: {document_id}")
+                        return
+
+                    # Extract text from the document
+                    extracted_texts = extract_text_from_file(file_path)
+                    if not extracted_texts:
+                        logger.error(f"Failed to extract text from session document: {file_path}")
+                        return
+
+                    # Create a content preview
+                    content_preview = ""
+                    for text_data in extracted_texts[:2]:  # Just use first couple of pages for preview
+                        content_preview += text_data['text'][:250]
+                        if len(content_preview) >= 250:
+                            content_preview = content_preview[:250] + "..."
+                            break
+
+                    # Verify document still exists before updating
+                    try:
+                        session_doc = SessionDocument.objects.get(id=document_id)
+                        session_doc.content_preview = content_preview
+                        session_doc.save()
+                    except (ObjectDoesNotExist, DatabaseError):
+                        # Document has been deleted during processing
+                        logger.info(f"Document {document_id} was deleted during processing - skipping update")
+                        return
+
+                    # Process each extracted text into chunks with embeddings
+                    chunks_created = 0
+
+                    for idx, extracted in enumerate(extracted_texts):
+                        # Check if document still exists periodically
+                        if idx % 5 == 0:  # Check every 5 chunks
+                            try:
+                                # Just check existence, don't retrieve full object
+                                if not SessionDocument.objects.filter(id=document_id).exists():
+                                    logger.info(f"Document {document_id} was deleted during processing - stopping chunk creation")
+                                    return
+                            except DatabaseError:
+                                # Database error, likely due to deletion
+                                return
+
+                        text = extracted['text']
+                        page = extracted.get('page', idx + 1)
+
+                        if not text.strip():
+                            continue
+
+                        # Split text into chunks
+                        chunks = create_text_chunks(text)
+
+                        # Create chunks with embeddings
+                        for chunk_idx, chunk_text in enumerate(chunks):
+                            if not chunk_text.strip():
+                                continue
+
+                            try:
+                                # Double-check the document still exists before each chunk creation
+                                if not SessionDocument.objects.filter(id=document_id).exists():
+                                    return
+                                
+                                # Generate embedding
+                                embedding = create_embedding(chunk_text)
+
+                                # Create the session document chunk
+                                chunk = SessionDocumentChunk(
+                                    session_document_id=document_id,  # Use direct ID assignment to avoid foreign key issues
+                                    content=chunk_text,
+                                    chunk_index=chunks_created,
+                                    page_number=page
+                                )
+
+                                if embedding is not None:
+                                    chunk.embedding_vector = embedding.tobytes()
+
+                                chunk.save()
+                                chunks_created += 1
+
+                            except ObjectDoesNotExist:
+                                # Document was deleted, stop processing silently
+                                return
+                            except DatabaseError as db_error:
+                                # Likely foreign key error due to document being deleted
+                                if "FOREIGN KEY constraint failed" in str(db_error):
+                                    logger.debug(f"Document {document_id} no longer exists, stopping processing")
+                                    return
+                                logger.error(f"Database error processing chunk: {str(db_error)}")
+                                return
+                            except Exception as chunk_error:
+                                # Don't log foreign key errors, as these are expected when documents are deleted
+                                if "FOREIGN KEY constraint failed" not in str(chunk_error):
+                                    logger.error(f"Error processing session document chunk: {str(chunk_error)}")
+                                return  # Stop processing on any error
+
+                    logger.info(f"Successfully processed session document: {document_id} with {chunks_created} chunks")
+                except ObjectDoesNotExist:
+                    # Document doesn't exist anymore, log at debug level only since this is expected during cleanup
+                    logger.debug(f"Session document with ID {document_id} not found, was likely deleted")
+                except DatabaseError as db_error:
+                    # Likely foreign key error, which we expect if document was deleted
+                    if "FOREIGN KEY constraint failed" in str(db_error):
+                        logger.debug(f"Document {document_id} was deleted during processing")
+                    else:
+                        logger.error(f"Database error in document processing: {str(db_error)}")
+                except Exception as e:
+                    # Non-database errors should still be logged
+                    logger.error(f"Error in document processing: {str(e)}")
+
+            else:
+                # Process as new document (fallback to original behavior)
+                from utils.document_processor import process_session_document
+                process_session_document(
+                    file_path=file_path,
+                    session_id=session_id,
+                    chat_id=chat_id,
+                    title=title,
+                    user=user
+                )
+
+        except Exception as e:
+            # Only log if not a foreign key constraint failure
+            if "FOREIGN KEY constraint failed" not in str(e):
+                logger.error(f"Error in session document processing thread: {e}")
+        finally:
+            # Always try to delete the temp file, even if processing fails
+            try:
+                if os.path.exists(file_path):
+                    os.unlink(file_path)
+            except Exception as e:
+                logger.error(f"Error deleting temporary file {file_path}: {e}")
+
+            # Explicitly close the database connection when done
+            try:
+                connection.close()
+            except Exception:
+                pass
 
     # Start background thread and detach it
     thread = threading.Thread(target=run_processing)
@@ -379,3 +551,258 @@ class RebuildVectorIndexView(APIView):
                 {"error": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+class SessionDocumentListCreateView(APIView):
+    """
+    API endpoint for listing and uploading session-based documents.
+    """
+    parser_classes = [MultiPartParser, FormParser]
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        """List all session documents for a session or chat."""
+        # Get query parameters
+        session_id = request.query_params.get('session_id')
+        chat_id = request.query_params.get('chat_id')
+
+        # Require at least one filter parameter
+        if not session_id and not chat_id:
+            return Response(
+                {"error": "Either session_id or chat_id query parameter is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Build filters
+        filters = {}
+        if session_id:
+            filters['session_id'] = session_id
+        if chat_id:
+            filters['chat_id'] = chat_id
+
+        # Get documents
+        documents = SessionDocument.objects.filter(**filters)
+        serializer = SessionDocumentSerializer(documents, many=True)
+
+        return Response(serializer.data)
+
+    def post(self, request):
+        """Upload a new session document."""
+        try:
+            # Create a temporary file to store the uploaded content
+            uploaded_file = request.FILES.get('file')
+            if not uploaded_file:
+                return Response(
+                    {"error": "No file provided"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Generate a session ID if not provided
+            session_id = request.data.get('session_id')
+            if not session_id:
+                session_id = uuid.uuid4().hex
+
+            # Save the file to a temporary location
+            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}") as temp:
+                for chunk in uploaded_file.chunks():
+                    temp.write(chunk)
+                temp_path = temp.name
+
+            # Process the session document
+            title = request.data.get('title', uploaded_file.name)
+            chat_id = request.data.get('chat_id')
+
+            # Create a new session document entry with minimal info
+            session_doc = SessionDocument.objects.create(
+                title=title,
+                session_id=session_id,
+                chat_id=chat_id,
+                file_type=temp_path.split('.')[-1].lower(),
+                uploaded_by=request.user,
+                content_preview="Processing document..."  # Placeholder
+            )
+
+            # Start async processing
+            process_id = uuid.uuid4().hex[:8]
+            logger.info(f"Processing session document {session_doc.id} '{title}' asynchronously with ID: {process_id}")
+
+            # Process in background thread - pass document_id to update existing document
+            process_session_document_async(
+                file_path=temp_path,
+                session_id=session_id,
+                chat_id=chat_id,
+                title=title,
+                user=request.user,
+                document_id=session_doc.id  # Pass the document ID
+            )
+
+            # Return the document information immediately
+            serializer = SessionDocumentSerializer(session_doc)
+            response_data = serializer.data
+            response_data['status'] = 'success'
+            response_data['message'] = 'Document uploaded successfully and is being processed in the background.'
+
+            return Response(
+                response_data,
+                status=status.HTTP_201_CREATED
+            )
+
+        except Exception as e:
+            logger.error(f"Error processing session document: {e}")
+            return Response(
+                {"error": f"Error processing document: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class SessionDocumentDetailView(APIView):
+    """
+    API endpoint for retrieving and deleting session documents.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, pk):
+        """Get details for a specific session document."""
+        try:
+            # Add a short timeout to prevent hanging requests
+            document = SessionDocument.objects.select_related('uploaded_by').get(pk=pk)
+
+            # Get chunks with additional error handling
+            try:
+                # Limit chunk retrieval to avoid memory issues with large documents
+                chunks = document.chunks.all()[:500]  # Limit to 500 chunks max
+                chunk_count = chunks.count()
+
+                # If too many chunks, provide a warning
+                if chunk_count >= 500:
+                    logger.warning(f"Document {pk} has more than 500 chunks, only returning first 500")
+            except Exception as chunk_error:
+                logger.error(f"Error retrieving chunks for document {pk}: {str(chunk_error)}")
+                chunks = []
+                chunk_count = 0
+
+            # Use serializer with proper context and error handling
+            try:
+                serializer = SessionDocumentSerializer(document)
+                return Response(serializer.data)
+            except Exception as serialize_error:
+                logger.error(f"Error serializing document {pk}: {str(serialize_error)}")
+                # Return a simplified response if serialization fails
+                return Response({
+                    "id": document.id,
+                    "title": document.title,
+                    "session_id": document.session_id,
+                    "chat_id": document.chat_id,
+                    "content_preview": document.content_preview[:100] + "..." if document.content_preview else "",
+                    "file_type": document.file_type,
+                    "created_at": document.created_at,
+                    "chunk_count": chunk_count,
+                    "error": "Error retrieving full document details"
+                })
+
+        except SessionDocument.DoesNotExist:
+            return Response(
+                {"error": "Document not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            logger.error(f"Unexpected error in SessionDocumentDetailView.get: {str(e)}")
+            return Response(
+                {"error": f"Error retrieving document: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    def delete(self, request, pk):
+        """Delete a session document."""
+        try:
+            document = SessionDocument.objects.get(pk=pk)
+            document.delete()
+            return Response(
+                {"message": "Document deleted successfully"},
+                status=status.HTTP_204_NO_CONTENT
+            )
+        except SessionDocument.DoesNotExist:
+            return Response(
+                {"error": "Document not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            logger.error(f"Error deleting document {pk}: {str(e)}")
+            return Response(
+                {"error": f"Error deleting document: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class SessionDocumentSearchView(APIView):
+    """
+    API endpoint for searching within session documents.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        """Search within session documents using vector similarity."""
+        # Validate request
+        if not request.data.get('query') or not request.data.get('session_id'):
+            return Response(
+                {"error": "Both 'query' and 'session_id' are required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Get parameters
+        query = request.data.get('query')
+        session_id = request.data.get('session_id')
+        chat_id = request.data.get('chat_id')
+        top_k = int(request.data.get('top_k', 3))
+
+        # Perform the search
+        results = vector_search_session_documents(
+            query_text=query,
+            session_id=session_id,
+            chat_id=chat_id,
+            top_k=top_k
+        )
+
+        return Response(results)
+
+
+class CleanupSessionDocumentsView(APIView):
+    """
+    API endpoint for cleaning up session documents.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        """Clean up session documents based on criteria."""
+        session_id = request.data.get('session_id')
+        chat_id = request.data.get('chat_id')
+        older_than_days = request.data.get('older_than_days')
+
+        # Require at least one filter
+        if not any([session_id, chat_id, older_than_days]):
+            return Response(
+                {"error": "At least one filter (session_id, chat_id, older_than_days) is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Convert older_than_days to integer if provided
+        if older_than_days:
+            try:
+                older_than_days = int(older_than_days)
+            except ValueError:
+                return Response(
+                    {"error": "older_than_days must be an integer"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        # Perform the cleanup
+        deleted_count = cleanup_session_documents(
+            session_id=session_id,
+            chat_id=chat_id,
+            older_than_days=older_than_days
+        )
+
+        return Response({
+            "message": f"Successfully deleted {deleted_count} session documents",
+            "deleted_count": deleted_count
+        })

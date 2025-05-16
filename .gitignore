@@ -74,3 +74,8 @@ node_modules/
 
 # Google credentials
 google-credentials.json
+
+
+db.sqlite3
+*.index
+*.json  # (optional, if metadata files are large or regenerated)

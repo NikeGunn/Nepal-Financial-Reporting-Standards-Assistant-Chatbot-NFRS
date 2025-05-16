@@ -75,3 +75,53 @@ class VectorIndex(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class SessionDocument(models.Model):
+    """
+    Model to store temporary session-based documents uploaded in the browser.
+    These documents are linked to specific chat sessions and are cleaned up when the chat is deleted.
+    """
+    SESSION_DOCUMENT_TYPES = [
+        ('pdf', 'PDF Document'),
+        ('txt', 'Text Document'),
+        ('docx', 'Word Document'),
+    ]
+
+    title = models.CharField(max_length=255)
+    content_preview = models.TextField(blank=True)  # Store a preview of the document content
+    session_id = models.CharField(max_length=255, db_index=True)  # Browser session identifier
+    chat_id = models.CharField(max_length=255, null=True, blank=True, db_index=True)  # Optional link to chat
+    file_type = models.CharField(max_length=10, choices=SESSION_DOCUMENT_TYPES)
+    uploaded_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='session_documents', null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['session_id']),
+            models.Index(fields=['chat_id']),
+        ]
+
+    def __str__(self):
+        return f"{self.title} (Session: {self.session_id[:8]})"
+
+
+class SessionDocumentChunk(models.Model):
+    """
+    Model to store chunked text from session documents for temporary use.
+    These chunks are processed in-memory and not stored in the vector index.
+    """
+    session_document = models.ForeignKey(SessionDocument, on_delete=models.CASCADE, related_name='chunks')
+    content = models.TextField()
+    chunk_index = models.IntegerField()
+    embedding_vector = models.BinaryField(null=True, blank=True)
+    page_number = models.IntegerField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['session_document', 'chunk_index']
+        unique_together = ['session_document', 'chunk_index']
+
+    def __str__(self):
+        return f"{self.session_document.title} - Chunk {self.chunk_index}"

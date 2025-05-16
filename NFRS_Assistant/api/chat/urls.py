@@ -9,6 +9,7 @@ urlpatterns = [
     # Chat messages
     path('messages/', views.ChatMessageView.as_view({'post': 'create'}), name='chat_message'),
     path('messages/translate/', views.ChatMessageView.as_view({'post': 'translate'}), name='translate_message'),
+    path('messages/session-documents/', views.ChatMessageView.as_view({'get': 'session_documents'}), name='session_documents'),
 
     # Add compatibility URL for ConversationListCreateView
     path('conversations-list/', views.ConversationListCreateView.as_view(), name='conversation-list-create'),

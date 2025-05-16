@@ -17,8 +17,10 @@ from .serializers import (
     ChatMessageSerializer,
     TranslateMessageSerializer
 )
-from api.knowledge.models import Document
+from api.knowledge.models import Document, SessionDocument, SessionDocumentChunk
+from api.knowledge.serializers import SessionDocumentSerializer
 from utils.vector_ops import search_documents
+from utils.document_processor import vector_search_session_documents, cleanup_session_documents
 from utils.translation import translate_text
 
 # Import multi-agent system with proper error handling
@@ -84,6 +86,23 @@ class ConversationViewSet(viewsets.ModelViewSet):
         conversation.save()
         return Response({'status': 'restored'})
 
+    def destroy(self, request, *args, **kwargs):
+        """Delete a conversation and clean up associated session documents."""
+        conversation = self.get_object()
+        conversation_id = str(conversation.id)
+        
+        # Delete the conversation
+        response = super().destroy(request, *args, **kwargs)
+        
+        # Clean up associated session documents
+        try:
+            deleted_count = cleanup_session_documents(chat_id=conversation_id)
+            logger.info(f"Deleted {deleted_count} session documents for conversation {conversation_id}")
+        except Exception as e:
+            logger.error(f"Error cleaning up session documents for conversation {conversation_id}: {e}")
+            
+        return response
+
 
 class ChatMessageView(viewsets.ViewSet):
     """
@@ -101,6 +120,7 @@ class ChatMessageView(viewsets.ViewSet):
         conversation_id = serializer.validated_data.get('conversation_id')
         language = serializer.validated_data.get('language', 'en')
         use_multi_agent = serializer.validated_data.get('use_multi_agent', True)
+        session_id = serializer.validated_data.get('session_id')
 
         # Get or create conversation
         if conversation_id:
@@ -152,12 +172,24 @@ class ChatMessageView(viewsets.ViewSet):
         try:
             # Get context from relevant documents
             context, sources = self._get_context_for_query(user_message)
+            
+            # Get context from session documents if available
+            session_context, session_docs = self._get_session_document_context(
+                user_message, 
+                session_id=session_id, 
+                chat_id=str(conversation.id)
+            )
+
+            # Combine contexts
+            combined_context = context
+            if session_context:
+                combined_context = session_context + "\n\n" + combined_context if combined_context else session_context
 
             # Generate assistant response based on mode
             if MULTI_AGENT_AVAILABLE and use_multi_agent:
                 response_data = self._generate_multi_agent_response(
                     user_message,
-                    context,
+                    combined_context,
                     conversation,
                     notifier
                 )
@@ -165,7 +197,7 @@ class ChatMessageView(viewsets.ViewSet):
                 experts_used = response_data.get("expert_used", [])
             else:
                 # Use standard RAG approach if multi-agent is not available or not requested
-                response_text = self._generate_standard_response(user_message, context, conversation)
+                response_text = self._generate_standard_response(user_message, combined_context, conversation)
                 experts_used = []
 
             # Save the assistant's response
@@ -191,6 +223,11 @@ class ChatMessageView(viewsets.ViewSet):
                 'conversation_id': conversation.id,
                 'sources': [{'id': doc.id, 'title': doc.title} for doc in sources]
             }
+            
+            # Add session document sources if available
+            if session_docs:
+                session_sources = [{'id': doc.id, 'title': doc.title, 'type': 'session'} for doc in session_docs]
+                response['session_sources'] = session_sources
 
             # Add experts if multi-agent was used
             if experts_used:
@@ -216,6 +253,68 @@ class ChatMessageView(viewsets.ViewSet):
             # Send completion notification
             if notifier:
                 notifier.send_thinking_complete()
+    
+    def _get_session_document_context(self, query, session_id=None, chat_id=None):
+        """
+        Get relevant context from session documents based on the query.
+        
+        Args:
+            query: The user query
+            session_id: Optional browser session ID
+            chat_id: Optional chat/conversation ID
+        
+        Returns:
+            tuple: (context_text, list_of_session_document_objects)
+        """
+        if not session_id and not chat_id:
+            return "", []
+            
+        try:
+            # Search for relevant documents using vector search
+            search_results = vector_search_session_documents(
+                query_text=query,
+                session_id=session_id,
+                chat_id=chat_id,
+                top_k=5  # Get top 5 most relevant chunks
+            )
+            
+            if not search_results or not search_results.get('results'):
+                return "", []
+                
+            # Get unique documents and format context
+            context_parts = []
+            session_docs = []
+            seen_doc_ids = set()
+            
+            for result in search_results.get('results', []):
+                doc_id = result.get('document_id')
+                if doc_id and doc_id not in seen_doc_ids:
+                    try:
+                        document = SessionDocument.objects.get(id=doc_id)
+                        if document not in session_docs:
+                            session_docs.append(document)
+                            seen_doc_ids.add(doc_id)
+                    except SessionDocument.DoesNotExist:
+                        continue
+                
+                # Format this chunk as context
+                context_parts.append(
+                    f"Document: {result.get('document_title', 'Unknown Document')}\n"
+                    f"Content: {result.get('content', '')}\n"
+                )
+            
+            # Combine all context parts
+            context_text = "\n\n".join(context_parts)
+            
+            # Add header to clearly identify this as session document content
+            if context_text:
+                context_text = "### Session Document Context ###\n\n" + context_text
+                
+            return context_text, session_docs
+            
+        except Exception as e:
+            logger.error(f"Error retrieving session document context: {e}")
+            return "", []
 
     def _get_context_for_query(self, query):
         """
@@ -438,3 +537,38 @@ Use a clear, professional tone suitable for financial professionals."""
                 {'error': _('An error occurred during translation.')},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+            
+    @action(detail=False, methods=['get'])
+    def session_documents(self, request):
+        """
+        Get session documents for a specific session ID or chat ID.
+        Endpoint: {{base_url}}/api/v1/chat/messages/session-documents/
+        """
+        # Get query parameters
+        session_id = request.query_params.get('session_id')
+        chat_id = request.query_params.get('chat_id')
+        
+        # Require at least one filter parameter
+        if not session_id and not chat_id:
+            return Response(
+                {"error": "Either session_id or chat_id query parameter is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        # Build filters
+        filters = {'uploaded_by': request.user}
+        if session_id:
+            filters['session_id'] = session_id
+        if chat_id:
+            filters['chat_id'] = chat_id
+            
+        # Get documents with prefetched chunks for better performance
+        documents = SessionDocument.objects.filter(**filters).prefetch_related('chunks')
+        
+        if not documents.exists():
+            return Response([])
+            
+        # Serialize the documents with their chunks
+        serializer = SessionDocumentSerializer(documents, many=True)
+        
+        return Response(serializer.data)

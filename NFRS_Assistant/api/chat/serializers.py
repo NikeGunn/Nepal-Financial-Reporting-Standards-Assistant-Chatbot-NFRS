@@ -85,6 +85,7 @@ class ChatMessageSerializer(serializers.Serializer):
     conversation_id = serializers.IntegerField(required=False, allow_null=True)
     language = serializers.CharField(required=False, default='en')
     use_multi_agent = serializers.BooleanField(required=False, default=True)
+    session_id = serializers.CharField(required=False, allow_null=True)
 
     def validate_message(self, value):
         """Validate that the message isn't empty."""
