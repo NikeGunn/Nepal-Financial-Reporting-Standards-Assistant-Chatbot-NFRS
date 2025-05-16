@@ -152,7 +152,7 @@ def process_session_document_async(file_path, session_id, chat_id=None, title=No
                                 # Double-check the document still exists before each chunk creation
                                 if not SessionDocument.objects.filter(id=document_id).exists():
                                     return
-                                
+
                                 # Generate embedding
                                 embedding = create_embedding(chunk_text)
 

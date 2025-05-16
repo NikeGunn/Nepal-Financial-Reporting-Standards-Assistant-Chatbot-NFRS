@@ -684,11 +684,11 @@ def cleanup_session_documents(session_id=None, chat_id=None, older_than_days=Non
         with transaction.atomic():
             # First, get IDs of documents to be deleted
             doc_ids_to_delete = list(SessionDocument.objects.filter(**filter_kwargs).values_list('id', flat=True))
-            
+
             if not doc_ids_to_delete:
                 logger.info(f"No session documents found to delete with filters: {filter_kwargs}")
                 return 0
-                
+
             # Use raw SQL to delete chunks first to handle potential race conditions
             if doc_ids_to_delete:
                 try:
@@ -702,11 +702,11 @@ def cleanup_session_documents(session_id=None, chat_id=None, older_than_days=Non
                     logger.info(f"Deleted {chunks_deleted} session document chunks for documents {doc_ids_to_delete}")
                 except Exception as e:
                     logger.error(f"Error deleting session document chunks: {e}")
-            
+
             # Now delete the documents
             deleted_count = SessionDocument.objects.filter(id__in=doc_ids_to_delete).delete()[0]
             logger.info(f"Deleted {deleted_count} session documents with IDs: {doc_ids_to_delete}")
-            
+
             return deleted_count
 
     except Exception as e:
