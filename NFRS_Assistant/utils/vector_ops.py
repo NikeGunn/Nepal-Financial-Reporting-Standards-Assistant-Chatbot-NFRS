@@ -8,7 +8,7 @@ import openai
 from django.conf import settings
 from sklearn.metrics.pairwise import cosine_similarity
 import pickle
-from api.knowledge.models import DocumentChunk, VectorIndex
+from api.knowledge.models import DocumentChunk, VectorIndex, Document
 import logging
 
 logger = logging.getLogger(__name__)
@@ -298,3 +298,19 @@ def update_index_with_chunks(chunks=None):
     except Exception as e:
         logger.error(f"Error updating vector index: {e}")
         return False
+
+
+def search_documents(query, top_k=5, filter_document_ids=None):
+    """
+    Search for documents relevant to a query.
+
+    Args:
+        query (str): The search query
+        top_k (int): Number of top results to return
+        filter_document_ids (list): Optional list of document IDs to filter results
+
+    Returns:
+        list: List of search results
+    """
+    # Use the existing vector_search function to find relevant documents
+    return vector_search(query, top_k, filter_document_ids)

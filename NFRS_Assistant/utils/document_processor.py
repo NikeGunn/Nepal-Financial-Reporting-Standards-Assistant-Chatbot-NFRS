@@ -7,7 +7,8 @@ import magic
 import logging
 import threading
 from django.conf import settings
-from utils.vector_ops import create_embedding
+from utils.vector_ops import create_embedding, update_index_with_chunks
+from django.db import transaction, IntegrityError, connection
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,121 @@ def create_text_chunks(text, max_chunk_size=1000, overlap=100):
     return chunks
 
 
+def fast_process_document(document_id, max_pages=2, max_chunks=5):
+    """
+    Quickly process the first few pages of a document for immediate availability.
+
+    This function rapidly extracts text from the first few pages, creates chunks,
+    and generates embeddings for immediate use in the chat interface, while the
+    full document continues processing in the background.
+
+    Args:
+        document_id: ID of the document to process
+        max_pages: Maximum number of pages to process quickly
+        max_chunks: Maximum number of chunks to process
+
+    Returns:
+        bool: Success status
+    """
+    from api.knowledge.models import DocumentChunk, Document
+
+    try:
+        # Get the document
+        document = Document.objects.get(id=document_id)
+
+        # Update processing status to show partial progress
+        document.processing_status = 'processing'
+        document.save(update_fields=['processing_status'])
+
+        # Extract text from the first few pages
+        file_path = document.file.path
+        mime_type = magic.from_file(file_path, mime=True)
+
+        # For PDFs, extract only first few pages
+        if 'pdf' in mime_type or file_path.lower().endswith('.pdf'):
+            pdf_document = fitz.open(file_path)
+            extracted_texts = []
+
+            # Only process first few pages
+            for page_num in range(min(max_pages, len(pdf_document))):
+                page = pdf_document[page_num]
+                text = page.get_text()
+                if text.strip():
+                    extracted_texts.append({
+                        'text': text,
+                        'page': page_num + 1
+                    })
+
+            pdf_document.close()
+        else:
+            # For other file types, just get beginning of text
+            extracted_texts = extract_text_from_file(file_path)
+            if len(extracted_texts) > 0:
+                # For non-PDF files, just take the first part of the text
+                text = extracted_texts[0]['text']
+                # Limit text size
+                limited_text = text[:max_chunks * 1000]  # Approximate size limit
+                extracted_texts = [{'text': limited_text, 'page': 1}]
+
+        # Process extracted text
+        chunks_created = 0
+        chunk_index = 0
+        all_chunks = []
+
+        for extracted in extracted_texts:
+            text = extracted['text']
+            page = extracted.get('page', 1)
+
+            if not text.strip():
+                continue
+
+            # Split text into chunks
+            chunks = create_text_chunks(text)
+
+            # Create document chunks with embeddings
+            for chunk_text in chunks:
+                if not chunk_text.strip() or chunks_created >= max_chunks:
+                    continue
+
+                # Create embedding
+                embedding = create_embedding(chunk_text)
+
+                # Create chunk
+                doc_chunk = DocumentChunk(
+                    document=document,
+                    content=chunk_text,
+                    chunk_index=10000 + chunk_index,  # Use high index to avoid conflicts with full processing
+                    page_number=page
+                )
+
+                if embedding is not None:
+                    doc_chunk.embedding_vector = embedding.tobytes()
+
+                doc_chunk.save()
+                all_chunks.append(doc_chunk)
+                chunks_created += 1
+                chunk_index += 1
+
+                # Break if we've reached the maximum number of chunks
+                if chunks_created >= max_chunks:
+                    break
+
+            if chunks_created >= max_chunks:
+                break
+
+        # Update the vector index with these initial chunks
+        if all_chunks:
+            update_index_with_chunks(all_chunks)
+            logger.info(f"Fast-processed document {document_id}: {chunks_created} chunks created for immediate use")
+            return True
+
+        return False
+
+    except Exception as e:
+        logger.error(f"Error in fast document processing: {e}")
+        return False
+
+
 def process_document(document_or_id):
     """
     Process a document: extract text, create chunks, generate embeddings.
@@ -174,7 +290,8 @@ def process_document(document_or_id):
             # This ensures the deletion is complete before we start adding new chunks
             try:
                 cursor = connection.cursor()
-                cursor.execute("DELETE FROM knowledge_documentchunk WHERE document_id = %s", [document.id])
+                # Delete regular chunks but keep fast-processed ones (with high chunk_index)
+                cursor.execute("DELETE FROM knowledge_documentchunk WHERE document_id = %s AND chunk_index < 10000", [document.id])
                 deleted_count = cursor.rowcount
                 logger.info(f"Successfully deleted {deleted_count} existing chunks for document {document.id} using raw SQL")
                 # Close cursor to release resources
@@ -267,6 +384,16 @@ def process_document(document_or_id):
         if created_chunks:
             document.processing_status = 'completed'
             logger.info(f"Successfully processed document {document.id} with {len(created_chunks)} chunks")
+
+            # Delete any fast-processed chunks now that full processing is done
+            try:
+                DocumentChunk.objects.filter(document_id=document.id, chunk_index__gte=10000).delete()
+                logger.info(f"Removed temporary fast-processed chunks for document {document.id}")
+            except Exception as cleanup_error:
+                logger.error(f"Error cleaning up fast-processed chunks: {cleanup_error}")
+
+            # Update the vector index with the new chunks
+            update_index_with_chunks(created_chunks)
         else:
             document.processing_status = 'failed'
             document.error_message = "No valid text chunks could be extracted"
@@ -298,6 +425,13 @@ def process_document_async(document_id):
     Args:
         document_id: ID of the document to process
     """
+    # First do quick processing for immediate availability
+    try:
+        fast_process_document(document_id)
+    except Exception as e:
+        logger.error(f"Error in fast document processing: {e}")
+
+    # Then start full processing in background
     # Check if this document is already being processed
     with _process_lock:
         if document_id in _document_process_locks and _document_process_locks[document_id].is_alive():
