@@ -314,3 +314,125 @@ def search_documents(query, top_k=5, filter_document_ids=None):
     """
     # Use the existing vector_search function to find relevant documents
     return vector_search(query, top_k, filter_document_ids)
+
+
+def generate_query_variations(query, num_variations=3):
+    """
+    Generate variations of a query for retrieval fusion.
+
+    Args:
+        query (str): The original search query
+        num_variations (int): Number of variations to generate
+
+    Returns:
+        list: List of query variations including the original query
+    """
+    try:
+        # Import OpenAI client
+        from openai import OpenAI
+
+        # Get API key from settings
+        api_key = settings.OPENAI_API_KEY
+
+        if not api_key:
+            logger.error("OpenAI API key is not configured")
+            return [query]  # Return original query if no API key
+
+        # Initialize the client with the API key
+        client = OpenAI(api_key=api_key)
+
+        # System prompt for generating query variations
+        system_prompt = """Generate semantically diverse variations of the user's search query.
+        Each variation should:
+        1. Capture a different aspect or perspective of the original query
+        2. Use different wording but maintain the core information need
+        3. Be self-contained and fully specified (not just adding a word or two)
+        4. Be concise and focused on retrieving relevant information
+
+        Return only the query variations with no additional text or formatting.
+        """
+
+        # Make the API call
+        response = client.chat.completions.create(
+            model=settings.CHAT_MODEL or "gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Original query: {query}\nGenerate {num_variations} different variations."}
+            ],
+            temperature=0.7,
+            max_tokens=200
+        )
+          # Extract variations from response
+        if response.choices and response.choices[0].message and response.choices[0].message.content:
+            content = response.choices[0].message.content.strip()
+
+            # Parse variations (one per line)
+            variations = [line.strip() for line in content.split('\n') if line.strip() and not line.strip().startswith('Variation')]
+        else:
+            logger.error("No valid response from OpenAI API")
+            return [query]  # Return original query on error
+
+        # Ensure we get the right number of variations
+        variations = variations[:num_variations]
+
+        # Always include the original query and ensure unique variations
+        all_queries = [query] + variations
+
+        # Return unique variations (preserving order)
+        unique_queries = []
+        seen = set()
+        for q in all_queries:
+            if q.lower() not in seen:
+                unique_queries.append(q)
+                seen.add(q.lower())
+
+        # Limit to num_variations + 1 (original + variations)
+        return unique_queries[:num_variations + 1]
+
+    except Exception as e:
+        logger.error(f"Error generating query variations: {e}")
+        return [query]  # Return original query on error
+
+
+def multi_query_search(query, top_k=5, filter_document_ids=None, num_variations=3):
+    """
+    Perform retrieval fusion (multi-query retrieval) to find relevant document chunks.
+
+    Args:
+        query (str): The original search query
+        top_k (int): Number of top results to return
+        filter_document_ids (list): Optional list of document IDs to filter results
+        num_variations (int): Number of query variations to generate
+
+    Returns:
+        list: List of dictionaries with deduplicated search results
+    """
+    try:
+        # Generate query variations
+        query_variations = generate_query_variations(query, num_variations)
+
+        # Track the combined results
+        all_results = []
+        seen_chunks = set()
+
+        # Run vector search for each query variation
+        for variation in query_variations:
+            results = vector_search(variation, top_k=top_k, filter_document_ids=filter_document_ids)
+
+            # Add results that haven't been seen yet
+            for result in results:
+                chunk_id = result['chunk_id']
+                if chunk_id not in seen_chunks:
+                    seen_chunks.add(chunk_id)
+                    all_results.append(result)
+
+        # Sort by score
+        all_results.sort(key=lambda x: x['score'], reverse=True)
+
+        # Return top_k results
+        return all_results[:top_k]
+
+    except Exception as e:
+        logger.error(f"Multi-query search error: {e}")
+        # Fall back to standard vector search
+        return vector_search(query, top_k, filter_document_ids)

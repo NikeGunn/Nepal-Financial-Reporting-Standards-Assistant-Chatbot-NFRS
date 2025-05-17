@@ -529,10 +529,33 @@ def process_session_document(file_path, session_id, chat_id=None, title=None, us
                 content_preview = content_preview[:250] + "..."
                 break
 
+        # Combine all document text for summarization
+        full_document_text = ""
+        for extracted in extracted_texts:
+            full_document_text += extracted['text'] + "\n\n"
+
+        # Generate detailed financial summary if document has enough content
+        document_summary = None
+        if len(full_document_text) > 500:  # Only summarize documents with significant content
+            try:
+                # Generate enhanced financial summary
+                logger.info(f"Generating enhanced financial summary for document: {title}")
+                summary_result = summarize_document(full_document_text, title)
+
+                if not summary_result.get('error'):
+                    document_summary = summary_result.get('summary')
+                    logger.info(f"Successfully generated enhanced financial summary ({len(document_summary)} chars)")
+                else:
+                    logger.warning(f"Error generating financial summary: {summary_result.get('summary')}")
+            except Exception as e:
+                logger.error(f"Exception during document summary generation: {str(e)}")
+                # Continue with document processing even if summary fails
+
         # Create the session document
         session_doc = SessionDocument.objects.create(
             title=title,
             content_preview=content_preview,
+            document_summary=document_summary,
             session_id=session_id,
             chat_id=chat_id,
             file_type=file_extension,
@@ -712,3 +735,155 @@ def cleanup_session_documents(session_id=None, chat_id=None, older_than_days=Non
     except Exception as e:
         logger.error(f"Error cleaning up session documents: {str(e)}")
         return 0
+def summarize_document(document_content, document_title=None, max_tokens=1500):
+    """
+    Generate a comprehensive summary of a document using GPT-3.5-Turbo for cost efficiency,
+    with extraction of financial metrics and information in a structured format.
+
+    Args:
+        document_content (str): The text content of the document to summarize
+        document_title (str, optional): The title of the document
+        max_tokens (int): Maximum number of tokens for the summary response (default 1500)
+
+    Returns:
+        dict: A dictionary containing the summary and metadata
+    """
+    try:
+        from utils.agents.multi_agent_chat import MultiAgentChat
+        import time
+
+        # Start tracking document processing time
+        start_time = time.time()
+        logger.info(f"Starting document summarization: '{document_title or 'Untitled'}'")
+
+        # Initialize multi-agent system with GPT-3.5 Turbo for cost-effective summarization
+        multi_agent = MultiAgentChat(
+            model_name="gpt-3.5-turbo",
+            temperature=0.2,
+            max_tokens=max_tokens,
+            max_experts=1  # Reduce to single expert for summarization and cost efficiency
+        )        # Create summarization prompt with document content
+        title_context = f"Document Title: {document_title}\n\n" if document_title else ""
+
+        # Further reduce character limit for GPT-3.5-Turbo to optimize cost
+        max_chars = 8000  # Reduced to approximately 2000 tokens for context to leave room for the prompt
+        content_truncated = document_content[:max_chars] if len(document_content) > max_chars else document_content
+
+        if len(document_content) > max_chars:
+            truncation_notice = f"\n\n[Note: Document was truncated from {len(document_content)} characters to {max_chars} characters for processing]"
+        else:
+            truncation_notice = ""
+
+        # Enhanced query for detailed financial information extraction with rich markdown formatting
+        summarization_query = (            "Create a concise financial document summary in well-formatted markdown. Follow this exact structure:\n\n"
+
+            "## 📊 **EXECUTIVE SUMMARY**\n"
+            "Provide a brief 2-3 sentence overview with **bold** for key points.\n\n"
+
+            "## 💰 **KEY FINANCIAL METRICS**\n\n"
+            "Create tables for financial data with exact values where available:\n\n"
+            "| Financial Metric | Current Period | Previous Period | Change (%) |\n"
+            "|:-----------------|:----------------|:----------------|:------------|\n"
+            "| Total Assets    |  |  |  |\n"
+            "| Total Liabilities |  |  |  |\n"
+            "| Revenue/Income  |  |  |  |\n"
+            "| Net Profit/Loss |  |  |  |\n"
+            "| Operating Cash Flow |  |  |  |\n\n"
+
+            "List key financial ratios with values:\n"
+            "- **Current Ratio**: [value]\n"
+            "- **Debt-to-Equity**: [value]\n"
+            "- **Return on Assets/Equity**: [value]\n"
+            "- **Net Profit Margin**: [value]\n\n"
+
+            "## 📈 **FINANCIAL STATEMENT ANALYSIS**\n\n"
+            "### **Balance Sheet Highlights**\n"
+            "Create a concise balance sheet summary table:\n\n"
+            "| Key Assets | Amount | Key Liabilities & Equity | Amount |\n"
+            "|:------------|:--------|:--------------------------|:--------|\n"
+            "| Current Assets |  | Current Liabilities |  |\n"
+            "| Non-Current Assets |  | Non-Current Liabilities |  |\n"
+            "| *Key Asset Items* |  | Long-term Debt |  |\n"
+            "|  |  | Equity |  |\n"
+            "| **TOTAL ASSETS** |  | **TOTAL LIABILITIES & EQUITY** |  |\n\n"            "### **Income Statement Analysis**\n"
+            "Summarize with this table format:\n\n"
+            "| Item | Current Amount | % of Revenue | YoY Change |\n"
+            "|:------|:--------------|:-------------|:------------|\n"
+            "| Revenue |  |  |  |\n"
+            "| Gross Profit |  |  |  |\n"
+            "| Operating Income |  |  |  |\n"
+            "| Net Income |  |  |  |\n\n"            "### **Cash Flow Statement**\n\n"
+            "| Category | Amount | Key Components |\n"
+            "|:----------|:--------|:---------------|\n"
+            "| Operating Activities |  |  |\n"
+            "| Investing Activities |  |  |\n"
+            "| Financing Activities |  |  |\n"
+            "| Net Cash Flow |  |  |\n\n"
+
+            "## 📝 **NFRS/IFRS COMPLIANCE**\n\n"            "List all specific standards referenced in the document with compliance status:\n\n"
+            "| Standard | Compliance Status | Key Notes |\n"
+            "|:----------|:-------------------|:----------|\n"
+            "| [Code] | [Status] | [Details] |\n\n"
+
+            "Summarize key accounting policies:\n"
+            "- **Revenue recognition**: [method]\n"
+            "- **Asset valuation**: [approach]\n"
+            "- **Depreciation/Amortization**: [policy]\n\n"
+
+            "## ⚠️ **RISK FACTORS & MANAGEMENT**\n\n"            "Create a risk assessment table:\n\n"
+            "| Risk Category | Key Risks | Impact | Mitigation |\n"
+            "|:---------------|:-----------|:--------|:------------|\n"
+            "| Financial Risk |  |  |  |\n"
+            "| Operational Risk |  |  |  |\n"
+            "| Market Risk |  |  |  |\n"
+            "| Regulatory Risk |  |  |  |\n\n"
+
+            "## 🔍 **AUDIT INFORMATION & NOTES**\n\n"
+            "Include audit details if available:\n"
+            "- **Auditor**: [name]\n"
+            "- **Audit Opinion**: [type]\n"
+            "- **Key Audit Matters**: [list]\n\n"
+
+            "Extract significant footnotes and exceptional items:\n"
+            "- **Contingent Liabilities**: [details]\n"
+            "- **Post-Balance Sheet Events**: [details]\n"
+            "- **Related Party Transactions**: [details]\n\n"
+
+            "Extract exact monetary amounts, percentages, dates, and timeframes throughout. Fill tables with actual values from the document. Use bold for totals and important figures. If data isn't available, indicate this clearly. Ensure accurate financial terminology consistent with accounting standards. Do NOT use ```md code blocks around the tables - format them as standard markdown tables with blank lines before and after each table."
+        )
+
+        # Process the query with the multi-agent system
+        response = multi_agent.process_query(
+            query=summarization_query,
+            context=f"{title_context}Document Content:{content_truncated}{truncation_notice}"
+        )        # Extract and return the summary
+        summary = response.get("message", "Summary generation failed")
+        experts_used = response.get("expert_used", [])
+
+        # Check if summary seems incomplete and add a note if needed
+        if len(summary) < 500:
+            summary += "\n\n*Note: The document summary was limited due to document complexity or length constraints.*"
+          # Calculate processing time
+        processing_time = time.time() - start_time
+        logger.info(
+            f"Document summarization completed in {processing_time:.2f}s: "
+            f"'{document_title or 'Untitled'}' ({len(content_truncated)} chars in, {len(summary)} chars out)"
+        )
+
+        # Return the summary with metadata and model information
+        return {
+            "summary": summary,
+            "model_used": "gpt-3.5-turbo",
+            "experts_used": experts_used,
+            "truncated": len(document_content) > max_chars,
+            "original_length": len(document_content),
+            "summarized_length": len(summary),
+            "processing_time_seconds": round(processing_time, 2)
+        }
+
+    except Exception as e:
+        logger.error(f"Error generating document summary: {e}")
+        return {
+            "summary": f"Error generating summary: {str(e)}",
+            "error": True
+        }

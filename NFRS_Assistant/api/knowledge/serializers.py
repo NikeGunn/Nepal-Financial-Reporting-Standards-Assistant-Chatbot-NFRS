@@ -103,6 +103,9 @@ class SearchQuerySerializer(serializers.Serializer):
         required=False,
         allow_empty=True
     )
+    use_fusion = serializers.BooleanField(required=False, default=True,
+        help_text="Whether to use retrieval fusion (multi-query retrieval) for better search results"
+    )
 
 
 class SessionDocumentChunkSerializer(serializers.ModelSerializer):
@@ -123,8 +126,8 @@ class SessionDocumentSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = SessionDocument
-        fields = ['id', 'title', 'content_preview', 'session_id', 'chat_id', 'file_type', 'uploaded_by', 'created_at', 'chunks']
-        read_only_fields = ['id', 'content_preview', 'created_at']
+        fields = ['id', 'title', 'content_preview', 'document_summary', 'session_id', 'chat_id', 'file_type', 'uploaded_by', 'created_at', 'chunks']
+        read_only_fields = ['id', 'content_preview', 'document_summary', 'created_at']
 
 
 class SessionDocumentUploadSerializer(serializers.ModelSerializer):

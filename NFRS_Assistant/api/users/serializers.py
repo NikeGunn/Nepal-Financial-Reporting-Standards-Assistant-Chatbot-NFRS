@@ -23,10 +23,11 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
     confirm_password = serializers.CharField(write_only=True)
     preferred_language = serializers.CharField(required=False, default='en')
     organization = serializers.CharField(required=False, allow_blank=True)
+    is_admin = serializers.BooleanField(required=False, default=False)
 
     class Meta:
         model = User
-        fields = ['username', 'email', 'password', 'confirm_password', 'first_name', 'last_name', 'preferred_language', 'organization']
+        fields = ['username', 'email', 'password', 'confirm_password', 'first_name', 'last_name', 'preferred_language', 'organization', 'is_admin']
 
     def validate(self, data):
         if data['password'] != data.pop('confirm_password'):
@@ -37,6 +38,7 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         # Extract profile data before creating user
         preferred_language = validated_data.pop('preferred_language', 'en')
         organization = validated_data.pop('organization', None)
+        is_admin = validated_data.pop('is_admin', False)
 
         # Create the user
         user = User.objects.create_user(**validated_data)
@@ -47,13 +49,15 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             profile.preferred_language = preferred_language
             if organization:
                 profile.organization = organization
+            profile.is_admin = is_admin
             profile.save()
         except UserProfile.DoesNotExist:
             # This shouldn't happen because of the signal, but just in case
             UserProfile.objects.create(
                 user=user,
                 preferred_language=preferred_language,
-                organization=organization
+                organization=organization,
+                is_admin=is_admin
             )
 
         return user

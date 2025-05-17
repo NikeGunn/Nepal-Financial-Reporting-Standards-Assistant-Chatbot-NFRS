@@ -159,8 +159,7 @@ class ChatMessageView(viewsets.ViewSet):
                 notifier = ProgressNotifier(
                     conversation_id=str(conversation.id),
                     user_id=str(request.user.id)
-                )
-                # Start thinking notification
+                )                # Start thinking notification
                 notifier.send_thinking_start()
 
                 # Start background notification thread
@@ -173,17 +172,20 @@ class ChatMessageView(viewsets.ViewSet):
             # Get context from relevant documents
             context, sources = self._get_context_for_query(user_message)
 
-            # Get context from session documents if available
+            # Get context from session documents if available - prioritize session documents
+            # Always include session document context even if the query doesn't directly relate
             session_context, session_docs = self._get_session_document_context(
                 user_message,
                 session_id=session_id,
                 chat_id=str(conversation.id)
             )
 
-            # Combine contexts
-            combined_context = context
+            # Combine contexts - place session context first as it's higher priority
+            combined_context = ""
             if session_context:
-                combined_context = session_context + "\n\n" + combined_context if combined_context else session_context
+                combined_context = session_context
+            if context:
+                combined_context = combined_context + "\n\n" + context if combined_context else context
 
             # Generate assistant response based on mode
             if MULTI_AGENT_AVAILABLE and use_multi_agent:
@@ -270,45 +272,88 @@ class ChatMessageView(viewsets.ViewSet):
             return "", []
 
         try:
-            # Search for relevant documents using vector search
+            # First, check if there are any session documents for this session/chat
+            filter_kwargs = {}
+            if session_id:
+                filter_kwargs["session_id"] = session_id
+            if chat_id:
+                filter_kwargs["chat_id"] = chat_id
+
+            session_documents = SessionDocument.objects.filter(**filter_kwargs)
+            if not session_documents.exists():
+                return "", []
+              # Get all document summaries first
+            summary_context_parts = []
+            for doc in session_documents:
+                if doc.content_preview and len(doc.content_preview) > 50:  # Ensure it's a real summary
+                    summary_context_parts.append(
+                        f"### Document Summary: {doc.title} ###\n"
+                        f"{doc.content_preview}\n"
+                    )
+
+            # Search for relevant document chunks using vector search
+            # Increased top_k to get more comprehensive context from session documents
             search_results = vector_search_session_documents(
                 query_text=query,
                 session_id=session_id,
                 chat_id=chat_id,
-                top_k=5  # Get top 5 most relevant chunks
+                top_k=7  # Increased from 5 to 7 to provide more comprehensive context
             )
 
-            if not search_results or not search_results.get('results'):
-                return "", []
-
             # Get unique documents and format context
-            context_parts = []
+            chunk_context_parts = []
             session_docs = []
             seen_doc_ids = set()
 
-            for result in search_results.get('results', []):
-                doc_id = result.get('document_id')
-                if doc_id and doc_id not in seen_doc_ids:
-                    try:
-                        document = SessionDocument.objects.get(id=doc_id)
-                        if document not in session_docs:
-                            session_docs.append(document)
-                            seen_doc_ids.add(doc_id)
-                    except SessionDocument.DoesNotExist:
-                        continue
+            # search_results is a list of dictionaries, not a dictionary with a 'results' key
+            if search_results and isinstance(search_results, list):
+                for result in search_results:
+                    doc_id = result.get('document_id')
+                    if doc_id and doc_id not in seen_doc_ids:
+                        try:
+                            document = SessionDocument.objects.get(id=doc_id)
+                            if document not in session_docs:
+                                session_docs.append(document)
+                                seen_doc_ids.add(doc_id)
+                        except SessionDocument.DoesNotExist:
+                            continue                    # Format this chunk as context with more detailed structure
+                    chunk_context_parts.append(
+                        f"## Excerpt from: {result.get('document_title', 'Unknown Document')} ##\n"
+                        f"Page/Section: {result.get('page_number', 'N/A')}\n"
+                        f"Relevance: {round(result.get('similarity', 0) * 100, 1)}% match\n"
+                        f"Content: {result.get('content', '')}\n"
+                    )
 
-                # Format this chunk as context
-                context_parts.append(
-                    f"Document: {result.get('document_title', 'Unknown Document')}\n"
-                    f"Content: {result.get('content', '')}\n"
-                )
+            # Combine summary context and chunk context
+            all_context_parts = []
+
+            # First add document summaries for all documents in the session
+            if summary_context_parts:
+                summary_section = "### DOCUMENT SUMMARIES ###\n\n" + "\n\n".join(summary_context_parts)
+                all_context_parts.append(summary_section)
+
+            # Then add specific chunks that match the query
+            if chunk_context_parts:
+                chunk_section = "### RELEVANT DOCUMENT SECTIONS ###\n\n" + "\n\n".join(chunk_context_parts)
+                all_context_parts.append(chunk_section)
+
+            # If we found no documents but have summaries, use the session documents
+            if not session_docs and session_documents:
+                session_docs = list(session_documents)
 
             # Combine all context parts
-            context_text = "\n\n".join(context_parts)
-
-            # Add header to clearly identify this as session document content
+            context_text = "\n\n".join(all_context_parts)            # Add header to clearly identify this as session document content
             if context_text:
-                context_text = "### Session Document Context ###\n\n" + context_text
+                context_text = "### SESSION DOCUMENT KNOWLEDGE BASE ###\n\n" + context_text
+
+            # Add instruction to the AI to use this knowledge
+            if context_text:
+                context_text += "\n\n## IMPORTANT INSTRUCTIONS FOR HANDLING SESSION DOCUMENTS ##\n"
+                context_text += "The information above comes from documents the user has uploaded specifically for this session. Follow these guidelines:\n"
+                context_text += "1. This is high-priority knowledge that should override any conflicting information in your general knowledge.\n"
+                context_text += "2. If the user's question relates to these documents, base your answer primarily on their content.\n"
+                context_text += "3. When citing information from these documents, mention the document title.\n"
+                context_text += "4. If the session documents don't contain relevant information for a question, use your general knowledge but acknowledge the limitations."
 
             return context_text, session_docs
 
@@ -351,13 +396,14 @@ class ChatMessageView(viewsets.ViewSet):
     def _generate_standard_response(self, query, context, conversation):
         """Generate a response using the standard RAG approach."""
         # Get conversation history
-        history = self._get_conversation_history(conversation)
-
-        # Build a standard system prompt for financial assistant
+        history = self._get_conversation_history(conversation)        # Build a standard system prompt for financial assistant
         system_prompt = """You are a helpful and knowledgeable financial assistant specializing in Nepal Financial Reporting Standards (NFRS) and International Financial Reporting Standards (IFRS).
 
-Answer questions based on the provided context information. If the context doesn't contain the relevant information,
-say so clearly rather than making up information.
+Answer questions based on the provided context information.
+
+PRIORITY INSTRUCTION: When answering questions, you must prioritize information from SESSION DOCUMENT KNOWLEDGE BASE sections over any other knowledge. These documents have been specifically uploaded by the user for this conversation and represent the most current and relevant information available. If information in these session documents contradicts your general knowledge, treat the session document information as authoritative.
+
+If the context doesn't contain the relevant information, say so clearly rather than making up information. When citing information from session documents, reference the document title to help the user understand the source.
 
 FORMATTING INSTRUCTIONS:
 - Always use Markdown formatting to structure your responses
@@ -391,10 +437,15 @@ Use a clear, professional tone suitable for financial professionals."""
 
             # Add conversation history
             for msg in history:
-                messages.append(msg)
-
-            # Add context as system message if available
+                messages.append(msg)            # Add context as system message if available
             if context:
+                # Extract and highlight the SESSION DOCUMENT KNOWLEDGE BASE section if present
+                if "### SESSION DOCUMENT KNOWLEDGE BASE ###" in context:
+                    messages.append({
+                        "role": "system",
+                        "content": "ATTENTION: The following context contains SESSION DOCUMENT KNOWLEDGE BASE information that should be treated as the highest priority source of information:"
+                    })
+
                 messages.append({
                     "role": "system",
                     "content": f"Here is relevant context information to help answer the query:\n\n{context}"
@@ -434,15 +485,15 @@ Use a clear, professional tone suitable for financial professionals."""
 
         Returns:
             Dictionary with response data
-        """
-        # Get conversation history
+        """        # Get conversation history
         history = self._get_conversation_history(conversation)
 
         # Initialize the multi-agent system
         multi_agent = MultiAgentChat(
             model_name=getattr(settings, 'CHAT_MODEL', 'gpt-3.5-turbo'),
             temperature=0.3,
-            max_tokens=1500
+            max_tokens=1500,
+            system_instructions="PRIORITY INSTRUCTION: When answering questions, you must prioritize information from SESSION DOCUMENT KNOWLEDGE BASE sections over any other knowledge. These documents have been specifically uploaded by the user for this conversation and represent the most current and relevant information available. If information in these session documents contradicts your general knowledge, treat the session document information as authoritative."
         )
 
         # Process the query

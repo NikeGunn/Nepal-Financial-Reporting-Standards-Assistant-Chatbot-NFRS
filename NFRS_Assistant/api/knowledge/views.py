@@ -23,10 +23,11 @@ from .serializers import (
     VectorIndexSerializer, SearchQuerySerializer, SessionDocumentSerializer,
     SessionDocumentUploadSerializer
 )
-from utils.vector_ops import create_embedding, update_index_with_chunks, vector_search
+from utils.vector_ops import create_embedding, update_index_with_chunks, vector_search, multi_query_search
 from utils.document_processor import (
     process_document_async, process_session_document,
-    vector_search_session_documents, cleanup_session_documents
+    vector_search_session_documents, cleanup_session_documents,
+    extract_text_from_file
 )
 
 # Setup logger
@@ -422,8 +423,15 @@ class VectorSearchView(APIView):
             filter_document_ids = serializer.validated_data.get('filter_document_ids', [])
 
             try:
-                # Use the vector_search utility function
-                results = vector_search(query, top_k=top_k * 2, filter_document_ids=filter_document_ids)
+                # Use the multi_query_search utility function for retrieval fusion
+                use_fusion = serializer.validated_data.get('use_fusion', True)
+
+                if use_fusion:
+                    # Use multi-query retrieval for better results
+                    results = multi_query_search(query, top_k=top_k, filter_document_ids=filter_document_ids)
+                else:
+                    # Use standard vector search if fusion is disabled
+                    results = vector_search(query, top_k=top_k * 2, filter_document_ids=filter_document_ids)
 
                 if not results:
                     return Response(
@@ -636,11 +644,64 @@ class SessionDocumentListCreateView(APIView):
                 document_id=session_doc.id  # Pass the document ID
             )
 
-            # Return the document information immediately
+            # Extract text for immediate summarization
+            extracted_texts = extract_text_from_file(temp_path)
+            document_text = ""
+            for text_data in extracted_texts:
+                document_text += text_data.get('text', '') + "\n\n"
+
+            # Generate automatic document summary if we have extracted text
+            summary_data = {}
+            if document_text:
+                try:
+                    # Import here to avoid circular imports
+                    from utils.document_processor import summarize_document                    # Generate document summary
+                    logger.info(f"Generating enhanced financial summary for document '{title}'")
+                    summary_data = summarize_document(document_text, title, max_tokens=1500)
+
+                    # Update document with summary
+                    if not summary_data.get('error'):
+                        full_summary = summary_data.get('summary', '')
+                        session_doc.document_summary = full_summary
+                        session_doc.content_preview = full_summary[:1000] + "..."
+                        session_doc.save(update_fields=['content_preview', 'document_summary'])
+
+                except Exception as summary_error:
+                    logger.error(f"Error generating document summary: {summary_error}")
+                    summary_data = {
+                        "summary": "Error generating summary. Full document content will still be processed.",
+                        "error": True
+                    }
+            else:
+                summary_data = {
+                    "summary": "Could not extract text from document for summarization.",
+                    "error": True
+                }
+
+            # Return the document information immediately with summary
             serializer = SessionDocumentSerializer(session_doc)
             response_data = serializer.data
             response_data['status'] = 'success'
             response_data['message'] = 'Document uploaded successfully and is being processed in the background.'
+
+            if 'experts_used' in summary_data:
+                response_data['experts_used'] = summary_data['experts_used']
+
+            # Include model information
+            if 'model_used' in summary_data:
+                response_data['model_used'] = summary_data['model_used']
+
+            # Include processing time if available
+            if 'processing_time_seconds' in summary_data:
+                response_data['processing_time_seconds'] = summary_data['processing_time_seconds']
+
+            # Include model information
+            if 'model_used' in summary_data:
+                response_data['model_used'] = summary_data['model_used']
+
+            # Include processing time if available
+            if 'processing_time_seconds' in summary_data:
+                response_data['processing_time_seconds'] = summary_data['processing_time_seconds']
 
             return Response(
                 response_data,

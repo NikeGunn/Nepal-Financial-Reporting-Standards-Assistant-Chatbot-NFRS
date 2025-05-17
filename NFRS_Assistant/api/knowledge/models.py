@@ -90,6 +90,7 @@ class SessionDocument(models.Model):
 
     title = models.CharField(max_length=255)
     content_preview = models.TextField(blank=True)  # Store a preview of the document content
+    document_summary = models.TextField(blank=True, null=True)  # Store detailed financial summary
     session_id = models.CharField(max_length=255, db_index=True)  # Browser session identifier
     chat_id = models.CharField(max_length=255, null=True, blank=True, db_index=True)  # Optional link to chat
     file_type = models.CharField(max_length=10, choices=SESSION_DOCUMENT_TYPES)

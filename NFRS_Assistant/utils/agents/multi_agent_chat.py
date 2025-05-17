@@ -81,7 +81,8 @@ class MultiAgentChat:
         model_name: str = "gpt-3.5-turbo",
         temperature: float = 0.3,
         max_tokens: int = 1500,
-        max_experts: int = 3
+        max_experts: int = 3,
+        system_instructions: str = None
     ):
         """
         Initialize the multi-agent chat system.
@@ -91,11 +92,13 @@ class MultiAgentChat:
             temperature: Temperature for generation (default: 0.3)
             max_tokens: Maximum tokens for generated responses (default: 1500)
             max_experts: Maximum number of expert agents to use (default: 3)
+            system_instructions: Additional instructions for the system prompt (default: None)
         """
         self.model_name = model_name
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.max_experts = max_experts
+        self.system_instructions = system_instructions
         self.api_key = settings.OPENAI_API_KEY
 
         # Validate API key
@@ -430,20 +433,22 @@ Context information:
         if not self.client:
             raise ValueError("OpenAI client is not available")
 
-        try:
-            # Create expert panel description
+        try:            # Create expert panel description
             expert_descriptions = "\n".join([
                 f"- {expert['name']} ({expert['title']}): {expert.get('description', '')}"
                 for expert in experts
             ])
 
-            # Create system prompt
+            # Create system prompt with additional instructions if provided
+            system_instructions_text = self.system_instructions if self.system_instructions else ""
             system_prompt = f"""You are a panel of financial experts specializing in Nepal Financial Reporting Standards (NFRS) and International Financial Reporting Standards (IFRS).
 
 The panel consists of:
 {expert_descriptions}
 
 As a panel, consult with each other and provide a thorough, authoritative answer based on the context provided. If the context doesn't contain the relevant information, acknowledge this explicitly.
+
+{system_instructions_text}
 
 FORMATTING INSTRUCTIONS:
 - Always use Markdown formatting to structure your responses
@@ -515,19 +520,10 @@ Context information:
         try:
             # Try one last direct API call with simplified prompt
             if self.client:
-                system_prompt = """You are a helpful financial assistant specializing in Nepal Financial Reporting Standards (NFRS).
+                # Get system instructions if available
+                system_instructions_text = self.system_instructions if self.system_instructions else ""
 
-Provide a professional response to the user's question based on any available context.
-
-FORMATTING INSTRUCTIONS:
-- Always use Markdown formatting to structure your responses
-- Use headers (##, ###) to organize information logically
-- Use **bold** for important terms, definitions, or key points
-- Use bullet points or numbered lists for series of related items
-- When presenting financial data like balance sheets, income statements, or audit reports, use Markdown tables
-- Format Nepal-specific content clearly with proper headings and sections
-
-Use a clear, professional tone suitable for financial professionals."""
+                system_prompt = "You are a helpful financial assistant specializing in Nepal Financial Reporting Standards (NFRS).\n\nProvide a professional response to the user's question based on any available context.\n\n" + system_instructions_text + "\n\nFORMATTING INSTRUCTIONS:\n- Always use Markdown formatting to structure your responses\n- Use headers (##, ###) to organize information logically\n- Use **bold** for important terms, definitions, or key points\n- Use bullet points or numbered lists for series of related items\n- When presenting financial data like balance sheets, income statements, or audit reports, use Markdown tables\n- Format Nepal-specific content clearly with proper headings and sections\n\nUse a clear, professional tone suitable for financial professionals."
 
                 messages = [
                     {"role": "system", "content": system_prompt}
